@@ -92,5 +92,7 @@ interfaces:
 - **Telephony/session store** — swap `memory.SessionStore`'s dict for Redis
   behind the same methods; connect Vapi/LiveKit to `voice.VoicePipeline`.
 
-See [`DECISIONS.md`](DECISIONS.md) for the non-obvious engineering choices and
-[`LIMITATIONS.md`](LIMITATIONS.md) for what v1 does not do.
+See [`EVIDENCE.md`](EVIDENCE.md) for the before/after A/B evidence + failure-mode
+report (PRD Phase-4 deliverable), [`DECISIONS.md`](DECISIONS.md) for the
+non-obvious engineering choices, and [`LIMITATIONS.md`](LIMITATIONS.md) for what
+v1 does not do.
