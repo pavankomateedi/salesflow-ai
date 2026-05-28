@@ -1,0 +1,331 @@
+"""The SalesAgent orchestrator.
+
+Ties the deterministic decisioning modules together into one auditable turn
+function: ``respond(state, prospect_text)`` analyses the utterance, updates
+signals, runs escalation -> disqualification -> objection -> phase logic in
+priority order, and returns a single :class:`AgentAction` with a full decision
+trace. Policy/pricing answers are grounded (KB + structured config); the LLM is
+only an optional phrasing layer.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+
+from salesflow import analysis
+from salesflow.agent.escalation import classify_escalation
+from salesflow.agent.pivot import pivot_ready
+from salesflow.agent.question_selector import QUESTIONS, next_field
+from salesflow.config import SETTINGS, Settings
+from salesflow.domain.models import (
+    ConversationState,
+    EscalationTrigger,
+    Outcome,
+    Phase,
+    Sentiment,
+    Turn,
+)
+from salesflow.knowledge.kb import KnowledgeBase, ObjectionType, classify_objection
+
+_PRICING_INTENT = (
+    "how much", "price", "pricing", "cost", "rate", "per hour", "per session", "plans",
+)
+_POLICY_INTENT = (
+    "cancel", "cancellation", "refund", "contract", "recording", "privacy",
+    "guarantee", "reschedule", "match", "subjects", "grades", "ferpa", "data",
+)
+# Specific facts we deliberately do not hold; a question hitting these escalates
+# as low-confidence rather than being answered from a loosely-matching chunk.
+_OUT_OF_SCOPE = (
+    "license", "certification", "credential", "accredited", "lawsuit",
+    "ceo", "revenue", "social security", "ssn",
+)
+
+
+@dataclass
+class Playbook:
+    """A promotable conversation strategy. The A/B runner swaps these.
+
+    ``questions`` overrides default field phrasings; ``objection_overrides``
+    swaps a rendered rebuttal for a given objection (e.g. ROI-framing vs
+    social-proof price variants).
+    """
+
+    name: str = "baseline"
+    questions: dict[str, str] = field(default_factory=lambda: dict(QUESTIONS))
+    objection_overrides: dict[ObjectionType, str] = field(default_factory=dict)
+
+
+@dataclass
+class AgentAction:
+    """One agent turn plus its decision trace (for transcripts + auditing)."""
+
+    utterance: str
+    phase: Phase
+    asked_field: str | None = None
+    objection: ObjectionType | None = None
+    escalation: EscalationTrigger | None = None
+    grounded_sources: list[str] = field(default_factory=list)
+    decision: dict[str, object] = field(default_factory=dict)
+
+
+class SalesAgent:
+    def __init__(
+        self,
+        kb: KnowledgeBase | None = None,
+        *,
+        settings: Settings = SETTINGS,
+        playbook: Playbook | None = None,
+        version: str = "alex-v1.0.0",
+    ) -> None:
+        self.kb = kb or KnowledgeBase()
+        self.settings = settings
+        self.playbook = playbook or Playbook()
+        self.version = version
+
+    # -- public API ---------------------------------------------------------
+
+    def open(self, state: ConversationState) -> AgentAction:
+        """The first agent turn: recording disclosure + warm identity confirm."""
+        greeting = (
+            self.settings.recording_disclosure
+            + "I'm reaching out about tutoring support — is now an okay time to chat?"
+        )
+        action = AgentAction(utterance=greeting, phase=Phase.WARMUP, decision={"step": "open"})
+        self._record(state, action)
+        return action
+
+    def respond(self, state: ConversationState, prospect_text: str) -> AgentAction:
+        """Produce the next agent action given a prospect utterance."""
+        self._ingest_prospect_turn(state, prospect_text)
+
+        sentiment = analysis.score_sentiment(prospect_text)
+        self._update_signals(state, prospect_text, sentiment)
+
+        # Resolve any grounded answer the prospect's question demands.
+        answer, sources, policy_unanswerable = self._grounded_answer(prospect_text)
+
+        # 1) Escalation has top priority.
+        esc = classify_escalation(
+            state,
+            prospect_text,
+            settings=self.settings,
+            policy_question_unanswerable=policy_unanswerable,
+        )
+        if esc is not None:
+            return self._escalate(state, esc.trigger, esc.reason)
+
+        # 2) Clear self-disqualification -> graceful exit.
+        if analysis.is_disqualifying(prospect_text):
+            return self._graceful_exit(state)
+
+        # 3) Objection handling (A-R-C).
+        objection = classify_objection(prospect_text)
+        if objection is not None:
+            return self._handle_objection(state, objection)
+
+        # 4) Normal phase progression (optionally prefixing a grounded answer).
+        return self._advance(state, prefix=answer, sources=sources)
+
+    # -- internals ----------------------------------------------------------
+
+    def _ingest_prospect_turn(self, state: ConversationState, text: str) -> None:
+        # Record the field we were waiting on as collected, unless this turn is
+        # really an objection or a disqualification rather than an answer.
+        last_asked = state.asked_fields[-1] if state.asked_fields else None
+        if last_asked and not state.lead.is_known(last_asked):
+            value = analysis.extracts_field(last_asked, text)
+            if value and classify_objection(text) is None and not analysis.is_disqualifying(text):
+                state.lead.collected[last_asked] = value
+        state.add_turn(
+            Turn(speaker="prospect", text=text, phase=state.phase,
+                 sentiment=analysis.score_sentiment(text))
+        )
+
+    def _update_signals(
+        self, state: ConversationState, text: str, sentiment: Sentiment
+    ) -> None:
+        if sentiment == Sentiment.NEGATIVE:
+            state.negative_streak += 1
+        else:
+            state.negative_streak = 0
+        if analysis.is_positive_intent(text) or sentiment == Sentiment.POSITIVE:
+            state.positive_signals += 1
+        if analysis.is_disqualifying(text):
+            state.disqualify_signals += 1
+
+    def _grounded_answer(self, text: str) -> tuple[str | None, list[str], bool]:
+        low = text.lower()
+        is_question = "?" in text
+        # Pricing answers come from structured config, never the LLM/KB prose.
+        if any(cue in low for cue in _PRICING_INTENT):
+            plans = self.settings.pricing.plans
+            answer = (
+                "Our plans are month-to-month: Starter at ${starter}/hour, "
+                "Standard at ${standard}/hour, and Intensive at ${intensive}/hour."
+            ).format(**plans)
+            return answer, ["pricing-config"], False
+        # Specific facts we don't hold -> low-confidence escalation, never a guess.
+        if is_question and any(cue in low for cue in _OUT_OF_SCOPE):
+            return None, [], True
+        # Policy questions: retrieval-only.
+        if is_question and any(cue in low for cue in _POLICY_INTENT):
+            chunks = self.kb.retrieve(text, k=1)
+            if chunks:
+                top = chunks[0]
+                return top.body, [top.source], False
+            return None, [], True  # unanswerable policy question -> escalate
+        return None, [], False
+
+    def _advance(
+        self, state: ConversationState, *, prefix: str | None, sources: list[str]
+    ) -> AgentAction:
+        if state.phase == Phase.WARMUP:
+            state.phase = Phase.DISCOVERY
+
+        nf = next_field(state.lead, state.asked_fields)
+        if nf is not None:
+            # We are still gathering fields: discovery (required) or qualification (leading).
+            if state.lead.discovery_complete():
+                state.phase = Phase.QUALIFICATION
+            elif state.phase not in (Phase.DISCOVERY, Phase.QUALIFICATION):
+                state.phase = Phase.DISCOVERY
+            state.asked_fields.append(nf)
+            question = self.playbook.questions.get(nf, QUESTIONS[nf])
+            utterance = f"{prefix} {question}".strip() if prefix else question
+            action = AgentAction(
+                utterance=utterance,
+                phase=state.phase,
+                asked_field=nf,
+                grounded_sources=sources,
+                decision={"step": "ask_field", "field": nf},
+            )
+            self._record(state, action)
+            return action
+
+        # All scripted fields gathered — try to pivot.
+        pivot = pivot_ready(state, self.settings)
+        if pivot.ready or state.phase == Phase.PIVOT_TO_CLOSE:
+            return self._pivot_or_close(state, pivot_signals=pivot.as_dict(), prefix=prefix)
+
+        # Not ready: do a soft fit-confirmation probe to elicit a signal.
+        state.phase = Phase.QUALIFICATION
+        state.probe_attempts += 1
+        probe = (
+            "Based on what you've shared, this sounds like a strong fit. "
+            "Does getting started this week sound good to you?"
+        )
+        utterance = f"{prefix} {probe}".strip() if prefix else probe
+        action = AgentAction(
+            utterance=utterance,
+            phase=Phase.QUALIFICATION,
+            grounded_sources=sources,
+            decision={"step": "qualify_probe", "pivot": pivot.as_dict()},
+        )
+        self._record(state, action)
+        return action
+
+    def _pivot_or_close(
+        self, state: ConversationState, *, pivot_signals: dict[str, bool], prefix: str | None
+    ) -> AgentAction:
+        # If we already pivoted and the prospect just gave positive intent, close.
+        last_prospect = state.prospect_turns[-1].text if state.prospect_turns else ""
+        if state.phase == Phase.PIVOT_TO_CLOSE and analysis.is_positive_intent(last_prospect):
+            state.phase = Phase.CLOSE
+            state.outcome = Outcome.CLOSED_WON
+            action = AgentAction(
+                utterance=(
+                    "Wonderful — I'll get your tutor match started and send a confirmation "
+                    "to your contact on file. You'll hear from us within 48 hours."
+                ),
+                phase=Phase.CLOSE,
+                decision={"step": "close", "pivot": pivot_signals},
+            )
+            self._record(state, action)
+            return action
+
+        # Pivoting again without a commitment is an unproductive turn; count it
+        # as a probe so a prospect who never commits eventually escalates as
+        # disqualification-uncertainty rather than looping forever.
+        if state.phase == Phase.PIVOT_TO_CLOSE:
+            state.probe_attempts += 1
+        state.phase = Phase.PIVOT_TO_CLOSE
+        name = state.lead.all_fields.get("student_name", "your student")
+        summary = (
+            f"So to recap: tutoring for {name}, month-to-month with a refundable first session "
+            "and a matched tutor within 48 hours. Shall we get the first session scheduled?"
+        )
+        utterance = f"{prefix} {summary}".strip() if prefix else summary
+        action = AgentAction(
+            utterance=utterance,
+            phase=Phase.PIVOT_TO_CLOSE,
+            decision={"step": "pivot", "pivot": pivot_signals},
+        )
+        self._record(state, action)
+        return action
+
+    def _handle_objection(self, state: ConversationState, objection: ObjectionType) -> AgentAction:
+        state.phase = Phase.OBJECTION_HANDLING
+        if objection.value not in state.open_objections:
+            state.open_objections.append(objection.value)
+        override = self.playbook.objection_overrides.get(objection)
+        rebuttal = self.kb.rebuttal(objection)
+        fallback = "I understand — let me address that."
+        text = override or (rebuttal.render() if rebuttal else fallback)
+        # A-R-C closes by re-engaging; treat the objection as handled and clear it
+        # so a resolved objection no longer blocks pivot (recurrence -> probes/escalation).
+        if objection.value in state.open_objections:
+            state.open_objections.remove(objection.value)
+        if objection.value not in state.resolved_objections:
+            state.resolved_objections.append(objection.value)
+        action = AgentAction(
+            utterance=text,
+            phase=Phase.OBJECTION_HANDLING,
+            objection=objection,
+            grounded_sources=["objections"] if not override else ["objections", "variant"],
+            decision={"step": "objection", "type": objection.value, "variant": bool(override)},
+        )
+        self._record(state, action)
+        return action
+
+    def _escalate(
+        self, state: ConversationState, trigger: EscalationTrigger, reason: str
+    ) -> AgentAction:
+        state.phase = Phase.ESCALATION
+        state.outcome = Outcome.ESCALATED
+        state.escalation_trigger = trigger
+        action = AgentAction(
+            utterance=(
+                "Let me get you to a specialist who can give you the most accurate help — "
+                "I'm connecting you now and passing along everything we've discussed."
+            ),
+            phase=Phase.ESCALATION,
+            escalation=trigger,
+            decision={"step": "escalate", "trigger": trigger.value, "reason": reason},
+        )
+        self._record(state, action)
+        return action
+
+    def _graceful_exit(self, state: ConversationState) -> AgentAction:
+        state.phase = Phase.GRACEFUL_EXIT
+        state.outcome = Outcome.GRACEFUL_EXIT
+        action = AgentAction(
+            utterance=(
+                "Totally understand — thanks for your time. May we reach out in the future "
+                "if things change? Have a great day either way."
+            ),
+            phase=Phase.GRACEFUL_EXIT,
+            decision={"step": "graceful_exit"},
+        )
+        self._record(state, action)
+        return action
+
+    def _record(self, state: ConversationState, action: AgentAction) -> None:
+        state.add_turn(
+            Turn(
+                speaker="agent",
+                text=action.utterance,
+                phase=action.phase,
+                decision=action.decision,
+            )
+        )

@@ -1,0 +1,74 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "salesflow"
+version = "0.1.0"
+description = "SalesFlow AI — autonomous voice sales agent (eval-first core)"
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+authors = [{ name = "Pavan Kumar" }]
+dependencies = [
+    "pyyaml>=6.0",
+]
+
+[project.optional-dependencies]
+# Real LLM backend — optional so the harness + tests run fully offline.
+llm = ["anthropic>=0.40"]
+# Live voice pipeline adapters — optional, require API keys.
+voice = ["anthropic>=0.40"]
+dev = [
+    "pytest>=8.0",
+    "pytest-cov>=5.0",
+    "ruff>=0.6",
+    "mypy>=1.11",
+    "types-PyYAML>=6.0",
+]
+
+[project.scripts]
+salesflow-eval = "salesflow.eval.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+salesflow = ["knowledge/data/*.md", "eval/goldens/*.yaml"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q --strict-markers"
+markers = [
+    "live: tests that require a real ANTHROPIC_API_KEY (skipped offline)",
+]
+
+[tool.coverage.run]
+source = ["salesflow"]
+branch = true
+omit = ["*/voice/live_*.py", "*/eval/cli.py"]
+
+[tool.coverage.report]
+show_missing = true
+# Quality gate: the deterministic core must stay well-covered.
+fail_under = 85
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM", "RUF"]
+# SIM905: building a word-set from "a b c".split() is a deliberate compact idiom.
+ignore = ["SIM905"]
+
+[tool.mypy]
+python_version = "3.11"
+packages = ["salesflow"]
+mypy_path = "src"
+warn_unused_ignores = true
+warn_redundant_casts = true
+disallow_untyped_defs = true
+no_implicit_optional = true
+ignore_missing_imports = true

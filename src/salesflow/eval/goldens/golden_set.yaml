@@ -1,0 +1,164 @@
+# SalesFlow golden set — the spec the decisioning core is held to.
+# Each section is input -> expected, asserted exactly by tests/test_golden_set.py.
+# Grow this file when a new failure shows up in the wild (PRD: continuous improvement).
+
+# --- Objection classification (phrase-based, must not fire on plain answers) ---
+objection_classification:
+  - input: "It also sounds a little expensive for our budget."
+    expected: price
+  - input: "Honestly that's a lot of money."
+    expected: price
+  - input: "I'm also looking at another company that seems cheaper."
+    expected: competitor
+  - input: "I need to talk to my husband first."
+    expected: decision_maker
+  - input: "It's not a good time right now, maybe later."
+    expected: timing
+  - input: "How do I know this will actually help my kid?"
+    expected: effectiveness
+  - input: "His name is Sam and he's in 7th grade."   # plain field answer
+    expected: null
+  - input: "We set aside about 200 a month."          # budget VALUE, not objection
+    expected: null
+
+# --- Dynamic question selection with skip-when-known ---
+question_selection:
+  - known: {}
+    expected: student_name
+  - known: {student_name: "Sam"}
+    expected: grade_level
+  # Required already known out of order -> still skipped, asks next missing required.
+  - known: {student_name: "Sam", urgency: "soon"}
+    expected: grade_level
+  # All required known -> first leading field by predictive value.
+  - known:
+      student_name: "Sam"
+      grade_level: "7th"
+      subjects: "math"
+      performance_level: "C"
+      parent_contact: "x@y.com"
+      urgency: "soon"
+    expected: prior_tutoring
+  # Everything known -> discovery complete.
+  - known:
+      student_name: "Sam"
+      grade_level: "7th"
+      subjects: "math"
+      performance_level: "C"
+      parent_contact: "x@y.com"
+      urgency: "soon"
+      prior_tutoring: "no"
+      test_deadline: "May"
+      schedule_windows: "evenings"
+      decision_maker: "me"
+      budget_signal: "200"
+    expected: null
+
+# --- Grounded RAG retrieval (retrieval-only for policy) ---
+rag_retrieval:
+  - query: "what is your cancellation policy?"
+    expected_source: policy
+    title_contains: "Cancellation"
+  - query: "can I get a refund if it doesn't work out?"
+    expected_source: policy
+    title_contains: "Refund"
+  - query: "how are you different from a local in-person tutor?"
+    expected_source: competitive
+    title_contains: "In-Person"
+  - query: "how does tutor matching work?"
+    expected_source: policy
+    title_contains: "Matching"
+
+# --- Phase state machine (auditable transitions) ---
+phase_transitions:
+  - {from: warmup, to: discovery, allowed: true}
+  - {from: warmup, to: close, allowed: false}
+  - {from: discovery, to: qualification, allowed: true}
+  - {from: qualification, to: pivot_to_close, allowed: true}
+  - {from: pivot_to_close, to: close, allowed: true}
+  - {from: discovery, to: escalation, allowed: true}     # off-ramp from anywhere
+  - {from: qualification, to: graceful_exit, allowed: true}
+  - {from: close, to: discovery, allowed: false}         # terminal
+  - {from: escalation, to: discovery, allowed: false}    # terminal
+
+# --- Escalation classifier (all 5 trigger types) ---
+escalation:
+  - text: "Can I just talk to a real person please?"
+    state: {}
+    expected: explicit_request
+  - text: "Can you give me a discount, like 25% off the price?"
+    state: {}
+    expected: high_stakes_pricing
+  - text: "This is ridiculous, what a waste of my time."
+    state: {negative_streak: 2}
+    expected: negative_sentiment
+  - text: "What is your tutor's exact state license number?"
+    state: {}
+    policy_unanswerable: true
+    expected: low_confidence
+  - text: "mm, maybe"
+    state: {probe_attempts: 4}
+    expected: disqualification_uncertainty
+  # A small discount within the autonomous limit must NOT escalate.
+  - text: "Any chance of a small 5% discount?"
+    state: {}
+    expected: null
+  - text: "His name is Sam."
+    state: {}
+    expected: null
+
+# --- Pivot-to-close 5-signal threshold ---
+pivot:
+  - description: "all five signals satisfied"
+    all_required: true
+    leading: {urgency: "soon", budget_signal: "200"}
+    positive_signals: 1
+    open_objections: []
+    disqualify_signals: 0
+    expected_ready: true
+  - description: "no positive signal blocks pivot"
+    all_required: true
+    leading: {urgency: "soon", budget_signal: "200"}
+    positive_signals: 0
+    open_objections: []
+    disqualify_signals: 0
+    expected_ready: false
+  - description: "open objection blocks pivot"
+    all_required: true
+    leading: {urgency: "soon", budget_signal: "200"}
+    positive_signals: 1
+    open_objections: ["price"]
+    disqualify_signals: 0
+    expected_ready: false
+  - description: "missing required fields blocks pivot"
+    all_required: false
+    leading: {urgency: "soon", budget_signal: "200"}
+    positive_signals: 1
+    open_objections: []
+    disqualify_signals: 0
+    expected_ready: false
+  - description: "disqualifier blocks pivot"
+    all_required: true
+    leading: {urgency: "soon", budget_signal: "200"}
+    positive_signals: 1
+    open_objections: []
+    disqualify_signals: 1
+    expected_ready: false
+
+# --- End-to-end self-play outcomes per adversarial persona ---
+self_play:
+  - persona: ReadyRita
+    expected_outcome: closed_won
+    expected_escalation: null
+  - persona: HesitantHenry
+    expected_outcome: closed_won
+    expected_escalation: null
+  - persona: PushbackPaula
+    expected_outcome: escalated
+    expected_escalation: high_stakes_pricing
+  - persona: DisqualifierDan
+    expected_outcome: graceful_exit
+    expected_escalation: null
+  - persona: SilentSam
+    expected_outcome: escalated
+    expected_escalation: disqualification_uncertainty

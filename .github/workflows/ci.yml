@@ -1,0 +1,40 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  quality-gates:
+    runs-on: ubuntu-latest
+    # Runs from this directory (the salesflow project root).
+    defaults:
+      run:
+        working-directory: ${{ github.workspace }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install tooling
+        run: pip install ruff mypy pytest pytest-cov pyyaml types-PyYAML
+
+      - name: Lint (ruff)
+        run: ruff check src tests
+
+      - name: Typecheck (mypy)
+        run: mypy
+        env:
+          PYTHONPATH: src
+
+      - name: Test + coverage gate (offline, mock LLM)
+        run: pytest --cov --cov-report=term-missing
+        env:
+          PYTHONPATH: src
+
+      - name: Eval harness smoke (self-play + A/B)
+        run: python -m salesflow.eval.cli all --n 100
+        env:
+          PYTHONPATH: src
