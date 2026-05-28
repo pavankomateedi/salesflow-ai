@@ -1,0 +1,17 @@
+# Render.com blueprint for the SalesFlow AI chat demo.
+#
+# Deploy: push this repo to GitHub, then in Render -> "New +" -> "Blueprint" and
+# point it at the repo (root = this salesflow/ directory). Render builds the
+# Dockerfile and assigns a public https URL. The demo runs the offline core, so
+# no secrets are required to get a working link.
+#
+# To enable the optional live Claude phrasing layer later, add ANTHROPIC_API_KEY
+# as a Render environment variable (Dashboard -> service -> Environment).
+services:
+  - type: web
+    name: salesflow-ai
+    runtime: docker
+    dockerfilePath: ./Dockerfile
+    plan: free
+    healthCheckPath: /healthz
+    autoDeploy: true

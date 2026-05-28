@@ -21,6 +21,9 @@ llm = ["anthropic>=0.40"]
 # (Ink-Whisper); groq and faster-whisper are alternative STT backends.
 voice = ["cartesia>=1.0", "groq>=0.11"]
 voice-local = ["faster-whisper>=1.0", "numpy>=1.26"]
+# Browser chat UI (`salesflow-web`) — the deployable demo surface. Optional; the
+# CLI, eval harness, and quality gates run without it.
+web = ["fastapi>=0.110", "uvicorn[standard]>=0.27"]
 dev = [
     "pytest>=8.0",
     "pytest-cov>=5.0",
@@ -31,6 +34,7 @@ dev = [
 
 [project.scripts]
 salesflow-eval = "salesflow.eval.cli:main"
+salesflow-web = "salesflow.web:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
@@ -48,7 +52,7 @@ markers = [
 [tool.coverage.run]
 source = ["salesflow"]
 branch = true
-omit = ["*/voice/live_*.py", "*/eval/cli.py"]
+omit = ["*/voice/live_*.py", "*/eval/cli.py", "*/web.py"]
 
 [tool.coverage.report]
 show_missing = true
