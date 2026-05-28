@@ -28,6 +28,8 @@ class MockVAD:
 
 
 class MockSTT:
+    name = "mock"
+
     def __init__(self, latency_ms: int = 150) -> None:
         self.latency_ms = latency_ms
 

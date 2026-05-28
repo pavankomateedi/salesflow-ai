@@ -6,6 +6,7 @@ barge-in handling offline, while live Deepgram/Cartesia/Vapi adapters (which nee
 API keys) drop in behind the same interfaces.
 """
 
+from salesflow.voice.factory import get_stt
 from salesflow.voice.interfaces import STT, TTS, VAD, AudioChunk, Transport
 from salesflow.voice.mock import MockSTT, MockTransport, MockTTS, MockVAD
 from salesflow.voice.pipeline import LATENCY_BUDGET_MS, TurnLatency, VoiceMetrics, VoicePipeline
@@ -24,4 +25,5 @@ __all__ = [
     "TurnLatency",
     "VoiceMetrics",
     "VoicePipeline",
+    "get_stt",
 ]

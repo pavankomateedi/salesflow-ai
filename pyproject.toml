@@ -17,8 +17,10 @@ dependencies = [
 [project.optional-dependencies]
 # Real LLM backend — optional so the harness + tests run fully offline.
 llm = ["anthropic>=0.40"]
-# Live voice pipeline adapters — optional, require API keys.
-voice = ["anthropic>=0.40"]
+# Live voice pipeline adapters — optional. Cartesia covers TTS + STT
+# (Ink-Whisper); groq and faster-whisper are alternative STT backends.
+voice = ["cartesia>=1.0", "groq>=0.11"]
+voice-local = ["faster-whisper>=1.0", "numpy>=1.26"]
 dev = [
     "pytest>=8.0",
     "pytest-cov>=5.0",

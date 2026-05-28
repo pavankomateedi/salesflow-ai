@@ -84,11 +84,16 @@ interfaces:
 - **LLM** — set `ANTHROPIC_API_KEY` and `pip install salesflow[llm]`;
   `llm.get_client()` switches from mock to Claude automatically (prompt caching
   on the system prompt is already wired).
-- **Voice** — implement the streaming bodies in `voice/live_deepgram.py`
-  (`DEEPGRAM_API_KEY`) and `voice/live_cartesia.py` (`CARTESIA_API_KEY`); they
-  already satisfy the `STT`/`TTS` protocols the `VoicePipeline` consumes. The
-  mock pipeline already validates the ≤800ms latency budget and barge-in (no
-  audio overlap).
+- **Voice** — TTS is Cartesia (`voice/live_cartesia.py`, `CARTESIA_API_KEY`).
+  STT is provider-pluggable via `voice.get_stt()` / the `SALESFLOW_STT` env var:
+  - `cartesia` (default) — Ink-Whisper, **reuses the same Cartesia key** as TTS
+  - `groq` — whisper-large-v3-turbo (`GROQ_API_KEY`)
+  - `local` — faster-whisper, on-device, **no key** (`pip install salesflow[voice-local]`)
+  - `mock` — offline default
+
+  All satisfy the `STT`/`TTS` protocols the `VoicePipeline` consumes; the mock
+  pipeline already validates the ≤800ms latency budget and barge-in (no audio
+  overlap). (Deepgram was dropped — key provisioning was unavailable.)
 - **Telephony/session store** — swap `memory.SessionStore`'s dict for Redis
   behind the same methods; connect Vapi/LiveKit to `voice.VoicePipeline`.
 

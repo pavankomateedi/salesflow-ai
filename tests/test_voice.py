@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-import os
-
 import pytest
 
 from salesflow.agent.agent import SalesAgent
@@ -44,13 +42,41 @@ def test_barge_in_is_handled_without_audio_overlap() -> None:
     assert metrics.barge_in_handle_rate == 1.0
 
 
-def test_live_adapters_require_keys() -> None:
-    from salesflow.voice.live_cartesia import CartesiaTTS
-    from salesflow.voice.live_deepgram import DeepgramSTT
+def test_stt_factory_defaults_to_mock_offline(monkeypatch: pytest.MonkeyPatch) -> None:
+    from salesflow.voice import get_stt
 
-    if not os.environ.get("DEEPGRAM_API_KEY"):
-        with pytest.raises(RuntimeError):
-            DeepgramSTT()
-    if not os.environ.get("CARTESIA_API_KEY"):
-        with pytest.raises(RuntimeError):
-            CartesiaTTS()
+    monkeypatch.delenv("SALESFLOW_STT", raising=False)
+    assert get_stt().name == "mock"
+    assert get_stt("mock").name == "mock"
+
+
+def test_stt_factory_rejects_unknown_provider() -> None:
+    from salesflow.voice import get_stt
+
+    with pytest.raises(ValueError, match="Unknown STT provider"):
+        get_stt("deepgram")  # retired — must not silently resolve
+
+
+def test_stt_factory_selects_provider_from_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    from salesflow.voice import get_stt
+
+    monkeypatch.setenv("SALESFLOW_STT", "cartesia")
+    monkeypatch.delenv("CARTESIA_API_KEY", raising=False)
+    # Provider chosen, but no key -> the adapter raises (proving selection works).
+    with pytest.raises(RuntimeError):
+        get_stt()
+
+
+def test_live_stt_adapters_require_keys(monkeypatch: pytest.MonkeyPatch) -> None:
+    from salesflow.voice.live_cartesia import CartesiaTTS
+    from salesflow.voice.live_cartesia_stt import CartesiaSTT
+    from salesflow.voice.live_groq_stt import GroqSTT
+
+    monkeypatch.delenv("CARTESIA_API_KEY", raising=False)
+    monkeypatch.delenv("GROQ_API_KEY", raising=False)
+    with pytest.raises(RuntimeError):
+        CartesiaSTT()
+    with pytest.raises(RuntimeError):
+        GroqSTT()
+    with pytest.raises(RuntimeError):
+        CartesiaTTS()

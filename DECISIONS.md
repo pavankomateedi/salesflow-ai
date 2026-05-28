@@ -94,6 +94,23 @@ the same protocols.
 validated offline without telephony or keys. Going live is implementing two
 `synthesize`/`transcribe` bodies, not changing the pipeline.
 
+## STT is provider-pluggable; Deepgram dropped
+
+**Decision:** Deepgram (the PRD's STT) was removed because the key could not be
+provisioned. STT is now selected via `voice.get_stt()` / `SALESFLOW_STT` across
+three interchangeable adapters: **Cartesia Ink-Whisper** (default), **Groq**
+whisper-large-v3-turbo, and **local faster-whisper** (no key).
+
+**Why:** Cartesia Ink-Whisper reuses the *same key as the TTS adapter*, so one
+provider covers both ends of the pipeline — the lowest-setup path. Groq is an
+easy-key fallback; local faster-whisper needs no key at all, which matters when
+API-key access is unreliable. All three sit behind the unchanged `STT` protocol,
+so the pipeline and the entire offline test suite are untouched — the mock STT
+remains the default and the factory falls back to it with no key configured.
+
+**Trade-off:** Groq's Whisper is chunk-based, not true websocket streaming;
+local latency depends on hardware. Cartesia (default) is true streaming.
+
 ## StrEnum for all enumerations
 
 **Decision:** Domain enums subclass `enum.StrEnum` (Python 3.11+).
