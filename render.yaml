@@ -1,12 +1,13 @@
-# Render.com blueprint for the SalesFlow AI chat demo.
+# Render.com blueprint for SalesFlow AI (React UI + FastAPI backend).
 #
 # Deploy: push this repo to GitHub, then in Render -> "New +" -> "Blueprint" and
-# point it at the repo (root = this salesflow/ directory). Render builds the
-# Dockerfile and assigns a public https URL. The demo runs the offline core, so
-# no secrets are required to get a working link.
+# point it at the repo. Render builds the multi-stage Dockerfile (React build +
+# Python runtime) and assigns a public https URL. The app runs the offline core,
+# so no secrets are required to get a working link.
 #
-# To enable the optional live Claude phrasing layer later, add ANTHROPIC_API_KEY
-# as a Render environment variable (Dashboard -> service -> Environment).
+# Optional live upgrades (Dashboard -> service -> Environment):
+#   OPENAI_API_KEY    — GPT phrasing layer
+#   CARTESIA_API_KEY  — live STT (Ink-Whisper) + TTS (Sonic) for the voice page
 services:
   - type: web
     name: salesflow-ai

@@ -69,6 +69,16 @@ def test_ab_playbook_override_swaps_rebuttal_text() -> None:
     assert "variant" in action.grounded_sources
 
 
+def test_competitive_question_is_grounded_in_battlecards() -> None:
+    agent, state = _fresh()
+    agent.open(state)
+    action = agent.respond(state, "How are you different from a local in-person tutor?")
+    # Answered from competitive.md (battlecards), not generated or left unanswered.
+    assert "competitive" in action.grounded_sources
+    assert "national tutor pool" in action.utterance.lower()
+    assert action.phase != Phase.ESCALATION  # a differentiation Q must not escalate
+
+
 def test_known_fields_are_not_re_asked() -> None:
     agent = SalesAgent()
     lead = Lead(phone="+15550003333", known={"student_name": "Mia", "grade_level": "8th"})

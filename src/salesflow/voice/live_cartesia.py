@@ -1,7 +1,12 @@
-"""Live Cartesia Sonic 3 TTS adapter (requires CARTESIA_API_KEY).
+"""Live Cartesia Sonic TTS adapter (requires CARTESIA_API_KEY).
 
-Stub implementing the :class:`TTS` protocol; the mock backend covers offline
-tests. Kept import-safe without the optional ``cartesia`` dependency.
+Implements the :class:`TTS` protocol by streaming raw PCM from Cartesia's Sonic
+model. Kept import-safe without the optional ``cartesia`` dependency so the
+offline mock remains the default and the test suite never needs the SDK or a key.
+
+The synthesize body runs only with a real key, so it is excluded from coverage;
+its contract (returns an ``AudioChunk`` whose ``pcm`` is 16-bit mono PCM at
+``sample_rate``) is what the WebSocket voice loop and the browser player rely on.
 """
 
 from __future__ import annotations
@@ -10,15 +15,46 @@ import os
 
 from salesflow.voice.interfaces import AudioChunk
 
+DEFAULT_MODEL = "sonic-2"
+# A neutral default Cartesia voice; override with CARTESIA_VOICE_ID.
+DEFAULT_VOICE_ID = "a0e99841-438c-4a64-b679-ae501e7d6091"
+DEFAULT_SAMPLE_RATE = 16000
+
 
 class CartesiaTTS:
-    latency_ms = 100  # Sonic 3 time-to-first-audio target
+    latency_ms = 100  # Sonic time-to-first-audio target
 
-    def __init__(self, voice: str = "alex-neutral") -> None:
+    def __init__(
+        self,
+        voice_id: str | None = None,
+        model: str = DEFAULT_MODEL,
+        sample_rate: int = DEFAULT_SAMPLE_RATE,
+    ) -> None:
         if not os.environ.get("CARTESIA_API_KEY"):
             raise RuntimeError("CARTESIA_API_KEY is not set")
-        self.voice = voice
-        # Real impl: open a streaming TTS session to Cartesia here.
+        try:
+            from cartesia import Cartesia
+        except ImportError as exc:  # pragma: no cover - optional extra
+            raise RuntimeError("cartesia SDK not installed (pip install salesflow[voice])") from exc
+
+        self._client = Cartesia(api_key=os.environ["CARTESIA_API_KEY"])
+        self.voice_id = voice_id or os.environ.get("CARTESIA_VOICE_ID", DEFAULT_VOICE_ID)
+        self.model = model
+        self.sample_rate = sample_rate
 
     def synthesize(self, text: str) -> AudioChunk:  # pragma: no cover - live only
-        raise NotImplementedError("Wire up the Cartesia streaming client for live calls.")
+        chunks = self._client.tts.bytes(
+            model_id=self.model,
+            transcript=text,
+            voice={"mode": "id", "id": self.voice_id},
+            language="en",
+            output_format={
+                "container": "raw",
+                "encoding": "pcm_s16le",
+                "sample_rate": self.sample_rate,
+            },
+        )
+        pcm = b"".join(chunks)
+        # ~150 wpm => ~400ms/word is too slow; estimate ~60ms/word for metrics.
+        duration_ms = max(1, len(text.split())) * 60
+        return AudioChunk(duration_ms=duration_ms, text=text, pcm=pcm)

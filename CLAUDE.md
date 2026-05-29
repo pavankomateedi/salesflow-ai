@@ -10,25 +10,27 @@ are the quality gates.
 The decision engine (state machine, question selection, escalation, pivot, RAG
 retrieval, pricing) is **fully deterministic and runs with no API key**. The LLM is
 an *optional* natural-language layer behind `llm.LLMClient`; `llm.get_client()`
-returns `MockLLMClient` whenever `ANTHROPIC_API_KEY` is unset (CI never has one).
+returns `MockLLMClient` whenever `OPENAI_API_KEY` is unset (CI never has one).
 This is why every gate is reproducible at zero cost. Do not move decision logic
-into the LLM — keep facts un-generatable.
+into the LLM — keep facts un-generatable. **LLM backend is OpenAI GPT**
+(`llm/openai_client.py`); Claude was swapped out to match the platform stack.
 
 ## Commands (run from `salesflow/`)
 
 ```powershell
-pip install -e ".[dev]"          # core + test tooling (offline)
-pip install -e ".[dev,llm,voice]" # + Claude + live Cartesia/Groq voice
-pytest                            # full suite (offline, ~75 tests)
-pytest --cov                      # with coverage; gate is fail_under = 85
-ruff check . ; mypy               # lint + type gates (must be clean)
-salesflow-eval all                # golden set + suite + A/B  (CLI: eval/cli.py)
-salesflow-eval suite              # KPI run over the 5 personas
-salesflow-eval ab                 # A/B experiment with z-test
+pip install -e ".[dev]"            # core + test tooling (offline)
+pip install -e ".[dev,llm,voice,web]"  # + OpenAI + Cartesia voice + FastAPI
+pytest --cov                       # full suite + coverage gate (fail_under = 85)
+ruff check src tests ; mypy        # lint + type gates (must be clean)
+salesflow-eval all                 # golden set + suite + A/B  (CLI: eval/cli.py)
+# Web app (React UI + FastAPI):
+cd frontend && npm install && npm run build && cd ..
+uvicorn salesflow.web:app --reload # / chat · /voice · /dashboard · /ws/voice
 ```
 
-All four gates (pytest, coverage ≥85, ruff, mypy) must be green before calling work
-done. Last known state: 75 tests pass, ~92.6% coverage, ruff + mypy clean.
+All gates (pytest, coverage ≥85, ruff, mypy) must be green before calling work
+done. Last known state: **94 tests pass, ~93.6% coverage**, ruff + mypy clean,
+React build succeeds.
 
 ## Layout (`src/salesflow/`)
 
@@ -56,9 +58,18 @@ done. Last known state: 75 tests pass, ~92.6% coverage, ruff + mypy clean.
 - `memory.py` — `SessionStore`, double-keyed `session_id::phone`, JSON persistence.
 - `voice/` — `interfaces.py` (STT/TTS/VAD/Transport Protocols), `mock.py`
   (text↔audio ~60ms/word, deterministic), `pipeline.py` (`VoicePipeline`, 800ms
-  latency budget, barge-in), `factory.py` (`get_stt()` selects backend via
-  `SALESFLOW_STT`). Live adapters `live_*.py` are import-safe and excluded from
-  coverage.
+  latency budget, barge-in), `factory.py` (`get_stt()`/`get_tts()`/`voice_available()`
+  select backend via `SALESFLOW_STT`/`CARTESIA_API_KEY`). Live adapters `live_*.py`
+  are import-safe and excluded from coverage.
+- `privacy.py` — PII scrubber (email/phone/name); `observability.save_transcript`
+  redacts by default so the on-disk transcript DB is PII-protected.
+- `web.py` — FastAPI: `/api/start`,`/api/chat`,`/api/kpis`,`/api/voice/status`,
+  `/ws/voice` WebSocket; serves the React build (vanilla fallback when unbuilt).
+  `eval/dashboard.py` assembles the dashboard data (testable, no web concern).
+- `frontend/` — Vite + React SPA: Chat, Voice (mic/playback + barge-in), Dashboard.
+  Built to `frontend/dist`; `test_web.py` skips when fastapi/httpx absent.
+- `deploy/` — `DEPLOY.md`, `cloudrun.service.yaml`, `apprunner-service.json`;
+  root `Dockerfile` is multi-stage (node build → python runtime), `render.yaml`.
 
 ## Hard-won invariants (do not regress — each is a golden-set finding)
 
@@ -67,6 +78,9 @@ done. Last known state: 75 tests pass, ~92.6% coverage, ruff + mypy clean.
 - "How much does it cost?" is a pricing *question* (→ grounded pricing), **not** a
   price *objection*. Keep `classify_objection` phrase-based.
 - objections.md must stay out of the customer-facing retrieval corpus.
+- Competitive *questions* ("how are you different from a local tutor?") route to
+  `competitive.md` retrieval (`grounded_sources=["competitive"]`); a competitor
+  *name* ("Wyzant") classifies as a COMPETITOR objection first.
 - Out-of-scope factual probes (license #, credentials, revenue) **escalate** as
   low-confidence rather than answering from a weak chunk.
 - Unproductive re-pivots increment `probe_attempts` so a non-committing prospect
@@ -91,4 +105,6 @@ shell/process.
 ## More detail
 
 `README.md` (usage), `DECISIONS.md` (full rationale for every choice above),
-`LIMITATIONS.md` (known gaps), `EVIDENCE.md` (Phase-4 results).
+`RESEARCH.md` (experiments + what was tried), `LIMITATIONS.md` (known gaps —
+incl. live Cartesia path unverified without a key), `EVIDENCE.md` (Phase-4
+results), `deploy/DEPLOY.md` (Render/Cloud Run/App Runner).

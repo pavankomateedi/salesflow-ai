@@ -3,10 +3,17 @@
 Mirrors the PRD's limitations, annotated with what this codebase does and does
 not implement.
 
-- **Live voice not connected.** The voice pipeline, latency budgeting, and
-  barge-in handling are validated against a deterministic mock. Deepgram/Cartesia
-  adapters are import-safe stubs; real streaming bodies + a Vapi/LiveKit
-  telephony bridge are needed for live calls. No audio is processed in v1.
+- **Live voice path is written but unverified without a key.** The `/ws/voice`
+  loop, barge-in, and the React mic/playback UI are wired end-to-end and tested
+  against the deterministic mock (turn-taking + decision events). The real
+  Cartesia calls (`live_cartesia.py` Sonic TTS, `live_cartesia_stt.py`
+  Ink-Whisper) run only when `CARTESIA_API_KEY` is set and have **not** been
+  exercised against the live API — the SDK signatures may need a minor tweak on
+  first real run. Offline, mic audio cannot be transcribed (the mock STT returns
+  no text), so the voice page falls back to a typed-utterance driver.
+
+- **No telephony bridge.** Browser voice (WebSocket) is the demo channel; a
+  Vapi/LiveKit/Twilio bridge to a real phone number is not wired.
 
 - **Field extraction is naive.** The deterministic core stores the prospect's
   raw answer as the field value (e.g. "His name is Sam"). An LLM extraction pass
@@ -20,7 +27,11 @@ not implement.
 
 - **Grounding judge scope.** The offline judge verifies pricing exactly and
   flags ungrounded dollar figures. Fuzzy policy-claim grounding is stubbed for an
-  optional LLM judge (real Claude backend); it is not run offline.
+  optional LLM judge (OpenAI backend); it is not run offline.
+
+- **React build required for the full UI.** `/voice` and `/dashboard` need the
+  built SPA (`cd frontend && npm run build`). Without it the backend serves a
+  vanilla fallback chat at `/`; the Docker image always builds the SPA.
 
 - **Sentiment is lexicon-based.** Negative/positive detection uses a word list,
   not an LLM. Good enough for the escalation streak trigger; a noisy real call

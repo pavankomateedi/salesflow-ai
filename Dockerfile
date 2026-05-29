@@ -1,6 +1,18 @@
-# SalesFlow AI — chat demo image.
-# Serves the FastAPI chat UI (salesflow.web). The conversation engine runs fully
-# offline (no API key); pricing is grounded from config, policy is retrieval-only.
+# SalesFlow AI — full-stack image (React UI + FastAPI backend).
+#
+# Stage 1 builds the React SPA; stage 2 is the Python runtime that serves both
+# the built SPA and the JSON/WebSocket APIs. The conversation engine runs fully
+# offline (no key); OPENAI_API_KEY / CARTESIA_API_KEY only upgrade phrasing+voice.
+
+# --- Stage 1: build the React frontend -------------------------------------
+FROM node:20-slim AS frontend
+WORKDIR /ui
+COPY frontend/package*.json ./
+RUN npm ci
+COPY frontend/ ./
+RUN npm run build
+
+# --- Stage 2: Python runtime -----------------------------------------------
 FROM python:3.12-slim
 
 ENV PYTHONUNBUFFERED=1 \
@@ -14,8 +26,12 @@ COPY pyproject.toml README.md ./
 COPY src ./src
 RUN pip install --upgrade pip && pip install ".[web]"
 
-# Hosts (Render/Railway/Fly) inject $PORT; default to 8000 locally.
-ENV PORT=8000
+# Built SPA, served by FastAPI as static files.
+COPY --from=frontend /ui/dist ./frontend/dist
+
+# Hosts (Render/Cloud Run/App Runner) inject $PORT; default to 8000 locally.
+ENV PORT=8000 \
+    SALESFLOW_FRONTEND_DIST=/app/frontend/dist
 EXPOSE 8000
 
 HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \

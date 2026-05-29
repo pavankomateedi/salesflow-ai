@@ -1,0 +1,29 @@
+# GCP Cloud Run service manifest for SalesFlow AI.
+# Build + deploy (Cloud Build picks up the repo Dockerfile automatically):
+#   gcloud run deploy salesflow-ai --source . --region us-central1 \
+#       --allow-unauthenticated --port 8000
+# Or apply this manifest against a pre-built image:
+#   gcloud builds submit --tag gcr.io/PROJECT_ID/salesflow-ai
+#   gcloud run services replace deploy/cloudrun.service.yaml --region us-central1
+apiVersion: serving.knative.dev/v1
+kind: Service
+metadata:
+  name: salesflow-ai
+spec:
+  template:
+    spec:
+      containerConcurrency: 40
+      containers:
+        - image: gcr.io/PROJECT_ID/salesflow-ai
+          ports:
+            - containerPort: 8000
+          resources:
+            limits:
+              cpu: "1"
+              memory: 512Mi
+          # Optional live upgrades — store as Secret Manager refs in production.
+          # env:
+          #   - name: OPENAI_API_KEY
+          #     value: ""
+          #   - name: CARTESIA_API_KEY
+          #     value: ""

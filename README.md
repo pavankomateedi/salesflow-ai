@@ -7,10 +7,17 @@ rather than vibe-checked. Implements Part 2 of the Nerdy Gauntlet PRD.
 
 > **Design stance.** The decisioning core (7-phase state machine, question
 > selector, escalation classifier, pivot logic, RAG retrieval) is **fully
-> deterministic and runs offline** with no API key. The LLM (Claude) is an
+> deterministic and runs offline** with no API key. The LLM (OpenAI GPT) is an
 > optional layer for natural-language surfaces; a deterministic mock backs every
-> test. Pricing and policy answers are **grounded** (structured config + retrieval),
-> never generated — so a post-call judge can verify there are zero hallucinations.
+> test. Pricing, policy, and competitive answers are **grounded** (structured
+> config + retrieval), never generated — so a post-call judge can verify there
+> are zero hallucinations.
+>
+> **Full stack.** A React UI (`frontend/`) provides three surfaces over a FastAPI
+> backend (`web.py`): **Chat** (text), **Voice** (real-time WebSocket loop with
+> barge-in, Cartesia STT+TTS), and a **Dashboard** (live KPIs, the A/B improvement
+> loop, and a PII-redacted sample transcript with per-turn decisions). One Docker
+> image builds the SPA and serves it with the APIs — see [`deploy/DEPLOY.md`](deploy/DEPLOY.md).
 
 ## Quick start
 
@@ -30,6 +37,18 @@ python -m salesflow.eval.cli suite --transcripts ./transcripts
 python -m salesflow.eval.cli ab --n 500 --seed 7
 ```
 
+## Web app (Chat · Voice · Dashboard)
+
+```bash
+pip install -e ".[web]"                   # FastAPI + uvicorn
+cd frontend && npm install && npm run build && cd ..   # build the React SPA
+uvicorn salesflow.web:app --reload        # http://localhost:8000
+```
+
+`/` Chat · `/voice` live voice (WebSocket + barge-in) · `/dashboard` KPIs + A/B +
+redacted transcript. Without the React build, `/` serves a lightweight fallback
+chat. Frontend dev with hot-reload + API proxy: `cd frontend && npm run dev`.
+
 ## What's here
 
 | Layer | Module | Notes |
@@ -37,12 +56,13 @@ python -m salesflow.eval.cli ab --n 500 --seed 7
 | Domain + state machine | `domain/` | 7 phases, auditable transition allow-list |
 | Decisioning engine | `agent/` | question selector · escalation (5 triggers) · A-R-C objections · pivot (5-signal) |
 | Grounded knowledge | `knowledge/` + `config.py` | retrieval-only policy answers; pricing from config |
-| LLM abstraction | `llm/` | `MockLLMClient` (offline) · `AnthropicClient` (Claude, prompt-cached) |
+| LLM abstraction | `llm/` | `MockLLMClient` (offline) · `OpenAIClient` (GPT, auto prompt-cached) |
 | Cross-call memory | `memory.py` | session-id + phone **double-key** |
 | Adversarial personas | `personas.py` | Ready Rita · Hesitant Henry · Pushback Paula · Disqualifier Dan · Silent Sam |
 | Eval | `eval/` | self-play harness · KPI scorers · grounding judge · golden set · A/B runner |
-| Observability | `observability.py` | per-call transcript + decision log, version-tagged |
-| Voice pipeline | `voice/` | VAD→STT→agent→TTS over protocols; mock + live Deepgram/Cartesia stubs |
+| Observability | `observability.py` | per-call transcript + decision log, version-tagged, **PII-redacted** (`privacy.py`) |
+| Voice pipeline | `voice/` | VAD→STT→agent→TTS over protocols; mock + live Cartesia (Sonic TTS · Ink-Whisper STT) |
+| Web app | `web.py` + `frontend/` | FastAPI APIs + `/ws/voice` WebSocket; React SPA (Chat · Voice · Dashboard) |
 
 ## Eval-first: the spec is executable
 
@@ -81,10 +101,10 @@ matching the PRD's "auto-promote only on statistical significance" rule.
 The offline build is complete; live wiring is additive behind the existing
 interfaces:
 
-- **LLM** — set `ANTHROPIC_API_KEY` and `pip install salesflow[llm]`;
-  `llm.get_client()` switches from mock to Claude automatically (prompt caching
-  on the system prompt is already wired).
-- **Voice** — TTS is Cartesia (`voice/live_cartesia.py`, `CARTESIA_API_KEY`).
+- **LLM** — set `OPENAI_API_KEY` and `pip install salesflow[llm]`;
+  `llm.get_client()` switches from mock to OpenAI GPT automatically (OpenAI
+  auto-caches the stable system prefix).
+- **Voice** — TTS is Cartesia Sonic (`voice/live_cartesia.py`, `CARTESIA_API_KEY`).
   STT is provider-pluggable via `voice.get_stt()` / the `SALESFLOW_STT` env var:
   - `cartesia` (default) — Ink-Whisper, **reuses the same Cartesia key** as TTS
   - `groq` — whisper-large-v3-turbo (`GROQ_API_KEY`)

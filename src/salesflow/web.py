@@ -1,39 +1,49 @@
-"""FastAPI chat UI for SalesFlow AI — talk to the agent "Alex" in the browser.
+"""FastAPI backend for SalesFlow AI.
 
-Drives the deterministic ``SalesAgent.respond()`` turn function over an
-in-memory, per-session :class:`ConversationState`. **No API key is required**:
-this serves the offline core — the exact engine the golden set and KPI gates
-exercise — so pricing is grounded from config and policy answers are
-retrieval-only. The optional LLM/voice layers are not needed to test the
-conversation logic here.
+Serves three things:
+  * JSON APIs the React UI consumes — ``/api/start`` + ``/api/chat`` (text chat),
+    ``/api/kpis`` (observability dashboard data), ``/api/voice/status``.
+  * ``/ws/voice`` — a WebSocket voice loop: prospect audio (or recognised text)
+    -> STT -> deterministic agent -> TTS audio back, with barge-in. Cartesia
+    powers STT+TTS when ``CARTESIA_API_KEY`` is set; offline it runs the mock
+    backend (text replies, no synthesised audio) so the loop is testable.
+  * The built React SPA (``frontend/dist``) at ``/``; if no build is present
+    (CI, bare checkout) it falls back to a self-contained vanilla chat page.
 
-Run locally:
-    uvicorn salesflow.web:app --reload
-    # or
-    salesflow-web
-
-Sessions live in process memory (the engine is deterministic and a demo needs
-no durability); a restart clears them. On hosts that inject ``$PORT``
-(Render/Fly/Railway) the launcher binds to it automatically.
+The conversation engine is the deterministic offline core — pricing is grounded
+from config, policy/competitive answers are retrieval-only — so the whole thing
+runs with no API key; OpenAI/Cartesia only upgrade phrasing and voice.
 """
 
 from __future__ import annotations
 
+import base64
 import os
 import uuid
+from functools import lru_cache
+from pathlib import Path
 
-from fastapi import FastAPI
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from salesflow import AGENT_VERSION
 from salesflow.agent.agent import AgentAction, SalesAgent
 from salesflow.domain.models import ConversationState, Lead
+from salesflow.eval.dashboard import build_dashboard
+from salesflow.voice.factory import get_stt, get_tts, voice_available
+from salesflow.voice.interfaces import AudioChunk
 
 app = FastAPI(title="SalesFlow AI — Alex", version=AGENT_VERSION)
 
 _agent = SalesAgent()
 _SESSIONS: dict[str, ConversationState] = {}
+
+_DEFAULT_DIST = Path(__file__).resolve().parents[2] / "frontend" / "dist"
+_FRONTEND_DIST = Path(os.environ.get("SALESFLOW_FRONTEND_DIST", str(_DEFAULT_DIST)))
+if (_FRONTEND_DIST / "assets").is_dir():
+    app.mount("/assets", StaticFiles(directory=_FRONTEND_DIST / "assets"), name="assets")
 
 
 class ChatRequest(BaseModel):
@@ -46,7 +56,6 @@ def _new_phone() -> str:
 
 
 def _payload(state: ConversationState, action: AgentAction) -> dict[str, object]:
-    """Serialise one agent turn + its decision trace for the client."""
     return {
         "reply": action.utterance,
         "phase": action.phase.value,
@@ -60,7 +69,7 @@ def _payload(state: ConversationState, action: AgentAction) -> dict[str, object]
     }
 
 
-# --- routes ----------------------------------------------------------------
+# --- JSON API --------------------------------------------------------------
 
 
 @app.get("/healthz")
@@ -70,19 +79,16 @@ def healthz() -> JSONResponse:
 
 @app.post("/api/start")
 def start() -> JSONResponse:
-    """Begin a new call: returns a session id + Alex's opening line."""
     session_id = uuid.uuid4().hex
     state = ConversationState(lead=Lead(phone=_new_phone()))
     _SESSIONS[session_id] = state
-    action = _agent.open(state)
-    payload = _payload(state, action)
+    payload = _payload(state, _agent.open(state))
     payload["session_id"] = session_id
     return JSONResponse(payload)
 
 
 @app.post("/api/chat")
 def chat(req: ChatRequest) -> JSONResponse:
-    """One prospect turn -> one agent action (with full decision trace)."""
     state = _SESSIONS.get(req.session_id)
     if state is None:
         return JSONResponse(
@@ -90,130 +96,159 @@ def chat(req: ChatRequest) -> JSONResponse:
         )
     if state.phase.is_terminal:
         return JSONResponse(
-            {"error": "this call has ended — start a new one", "terminal": True},
-            status_code=409,
+            {"error": "this call has ended — start a new one", "terminal": True}, status_code=409
         )
-    action = _agent.respond(state, req.message)
-    return JSONResponse(_payload(state, action))
+    return JSONResponse(_payload(state, _agent.respond(state, req.message)))
+
+
+@lru_cache(maxsize=4)
+def _kpis(n_ab: int) -> dict[str, object]:
+    return build_dashboard(n_ab=n_ab)
+
+
+@app.get("/api/kpis")
+def api_kpis(n_ab: int = 200) -> JSONResponse:
+    return JSONResponse(_kpis(max(20, min(2000, n_ab))))
+
+
+@app.get("/api/voice/status")
+def voice_status() -> JSONResponse:
+    return JSONResponse(
+        {
+            "available": voice_available(),
+            "stt": os.environ.get("SALESFLOW_STT", "mock") if voice_available() else "mock",
+            "tts": "cartesia" if voice_available() else "mock",
+            "note": (
+                "Cartesia voice active."
+                if voice_available()
+                else "Set CARTESIA_API_KEY for live audio; text replies still work."
+            ),
+        }
+    )
+
+
+# --- WebSocket voice loop --------------------------------------------------
+
+
+async def _send_audio(ws: WebSocket, text: str) -> None:
+    """Synthesise and stream TTS audio (no-op when the mock backend has no PCM)."""
+    try:
+        audio: AudioChunk = get_tts().synthesize(text)
+    except Exception as exc:  # live backend misconfigured — keep the text loop alive
+        await ws.send_json({"type": "audio_error", "detail": str(exc)})
+        return
+    if audio.pcm:
+        await ws.send_json(
+            {"type": "audio", "b64": base64.b64encode(audio.pcm).decode(), "sample_rate": 16000}
+        )
+
+
+@app.websocket("/ws/voice")
+async def ws_voice(ws: WebSocket) -> None:
+    await ws.accept()
+    state = ConversationState(lead=Lead(phone=_new_phone()))
+    opening = _agent.open(state)
+    await ws.send_json({"type": "reply", "transcript": None, **_payload(state, opening)})
+    await _send_audio(ws, opening.utterance)
+
+    try:
+        while True:
+            msg = await ws.receive_json()
+            kind = msg.get("type")
+            if kind == "barge":
+                # Prospect spoke over the agent — client stops playback; ack it.
+                await ws.send_json({"type": "barge_ack"})
+                continue
+            if kind == "end":
+                break
+
+            text = msg.get("text") or ""
+            if not text and msg.get("audio_b64"):
+                pcm = base64.b64decode(msg["audio_b64"])
+                text = get_stt().transcribe(AudioChunk(duration_ms=0, pcm=pcm)).text
+            if not text.strip():
+                continue
+            if state.phase.is_terminal:
+                await ws.send_json({"type": "ended", "outcome": state.outcome.value})
+                break
+
+            action = _agent.respond(state, text)
+            await ws.send_json({"type": "reply", "transcript": text, **_payload(state, action)})
+            await _send_audio(ws, action.utterance)
+            if state.phase.is_terminal:
+                await ws.send_json({"type": "ended", "outcome": state.outcome.value})
+                break
+    except WebSocketDisconnect:
+        pass
+
+
+# --- React SPA (with vanilla fallback when unbuilt) ------------------------
+
+
+def _spa_or_fallback() -> str:
+    index = _FRONTEND_DIST / "index.html"
+    if index.is_file():
+        return index.read_text(encoding="utf-8")
+    return _FALLBACK_PAGE
 
 
 @app.get("/", response_class=HTMLResponse)
 def home() -> HTMLResponse:
-    return HTMLResponse(_PAGE)
+    return HTMLResponse(_spa_or_fallback())
+
+
+@app.get("/voice", response_class=HTMLResponse)
+def voice_page() -> HTMLResponse:
+    return HTMLResponse(_spa_or_fallback())
+
+
+@app.get("/dashboard", response_class=HTMLResponse)
+def dashboard_page() -> HTMLResponse:
+    return HTMLResponse(_spa_or_fallback())
 
 
 def main() -> None:  # pragma: no cover - thin uvicorn launcher
     import uvicorn
 
-    port = int(os.environ.get("PORT", "8000"))
-    uvicorn.run("salesflow.web:app", host="0.0.0.0", port=port)
+    uvicorn.run("salesflow.web:app", host="0.0.0.0", port=int(os.environ.get("PORT", "8000")))
 
 
-# --- static single-page chat UI --------------------------------------------
+# --- vanilla fallback chat (served only when the React build is absent) ----
 
-_CSS = """
-:root{--bg:#0f1419;--card:#1a212b;--line:#2a3441;--ink:#e6edf3;--mut:#8b98a5;
---good:#2ea043;--bad:#f85149;--warn:#d29922;--accent:#58a6ff}
-*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--ink);
-font:15px/1.5 ui-sans-serif,system-ui,-apple-system,Segoe UI,Roboto,sans-serif}
-.wrap{max-width:820px;margin:0 auto;padding:28px 20px 60px}
-h1{font-size:24px;margin:0 0 4px}.sub{color:var(--mut);margin:0 0 18px;font-size:14px}
-.banner{padding:12px 16px;border-radius:12px;border:1px solid var(--line);
-background:var(--card);display:flex;gap:14px;align-items:center}
-.pill{padding:3px 11px;border-radius:999px;font-size:12px;font-weight:600;
-background:rgba(88,166,255,.16);color:var(--accent);white-space:nowrap}
-.meta{color:var(--mut);font-size:13px;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.log{margin:16px 0;border:1px solid var(--line);background:var(--card);
-border-radius:12px;padding:16px;height:54vh;overflow-y:auto;display:flex;
-flex-direction:column;gap:10px}
-.msg{max-width:80%;padding:10px 14px;border-radius:14px;white-space:pre-wrap;line-height:1.45}
-.msg.agent{align-self:flex-start;background:#1f2a37;
-border:1px solid var(--line);border-bottom-left-radius:4px}
-.msg.you{align-self:flex-end;background:rgba(88,166,255,.16);
-border:1px solid rgba(88,166,255,.35);border-bottom-right-radius:4px}
-.msg.sys{align-self:center;color:var(--mut);font-size:13px;background:transparent;
-border:1px dashed var(--line);max-width:90%;text-align:center}
-.composer{display:flex;gap:10px}
-.composer input{flex:1;padding:12px 14px;border-radius:10px;border:1px solid var(--line);
-background:#0d1117;color:var(--ink);font-size:15px}
-.composer input:focus{outline:none;border-color:var(--accent)}
-.btn{padding:10px 16px;border-radius:10px;border:1px solid var(--line);
-background:#22303f;color:var(--ink);font-weight:600;cursor:pointer}
-.btn:hover{border-color:var(--accent)}.btn:disabled{opacity:.5;cursor:not-allowed}
-.tips{margin:12px 0 0;color:var(--mut);font-size:13px}
-.tips code{background:#0d1117;padding:1px 6px;border-radius:5px;color:var(--accent);cursor:pointer}
-.foot{margin-top:22px;color:var(--mut);font-size:12px}
-"""
-
-_SCRIPT = """
-const log=document.getElementById('log');
-const form=document.getElementById('f');
-const input=document.getElementById('m');
-const phase=document.getElementById('phase');
-const meta=document.getElementById('meta');
-const sendBtn=document.getElementById('send');
-let sessionId=null, terminal=false;
-
-function bubble(role,text){
-  const d=document.createElement('div');
-  d.className='msg '+role; d.textContent=text;
-  log.appendChild(d); log.scrollTop=log.scrollHeight;
-}
-function status(d){
-  phase.textContent=d.phase;
-  let s='outcome: '+d.outcome;
-  if(d.grounded_sources&&d.grounded_sources.length){
-    s+='  ·  grounded: '+d.grounded_sources.join(', ');}
-  if(d.escalation){s+='  ·  escalation: '+d.escalation;}
-  if(d.objection){s+='  ·  objection: '+d.objection;}
-  meta.textContent=s;
-}
-async function start(){
-  log.innerHTML=''; terminal=false; input.disabled=false; sendBtn.disabled=false;
-  const r=await fetch('/api/start',{method:'POST'});
-  const d=await r.json(); sessionId=d.session_id;
-  bubble('agent',d.reply); status(d); input.focus();
-}
-async function send(text){
-  bubble('you',text);
-  const r=await fetch('/api/chat',{method:'POST',
-    headers:{'Content-Type':'application/json'},
-    body:JSON.stringify({session_id:sessionId,message:text})});
-  const d=await r.json();
-  if(d.error){bubble('sys',d.error);return;}
-  bubble('agent',d.reply); status(d);
-  if(d.terminal){terminal=true; input.disabled=true; sendBtn.disabled=true;
-    bubble('sys','Call ended ('+d.outcome+'). Click “New call” to start over.');}
-}
-form.addEventListener('submit',e=>{e.preventDefault();
-  const t=input.value.trim(); if(!t||terminal)return; input.value=''; send(t);});
-document.getElementById('reset').addEventListener('click',start);
-document.querySelectorAll('.tips code').forEach(el=>el.addEventListener('click',()=>{
-  if(terminal)return; input.value=el.textContent; input.focus();}));
-start();
-"""
-
-_PAGE = (
+_FALLBACK_PAGE = (
     "<!doctype html><html lang=en><head><meta charset=utf-8>"
     "<meta name=viewport content='width=device-width,initial-scale=1'>"
-    "<title>SalesFlow AI — Alex</title><style>" + _CSS + "</style></head><body><div class=wrap>"
-    "<h1>SalesFlow AI — talk to Alex</h1>"
-    "<p class=sub>Autonomous tutoring sales agent. This is the deterministic offline core — "
-    "no API key, the same engine the golden set + KPI gates exercise. "
-    "Pricing is grounded from config; policy answers are retrieval-only.</p>"
-    "<div class=banner><span class=pill id=phase>warmup</span>"
-    "<span class=meta id=meta></span>"
-    "<button id=reset class=btn>New call</button></div>"
+    "<title>SalesFlow AI — Alex</title>"
+    "<style>body{margin:0;background:#0f1419;color:#e6edf3;font:15px/1.5 system-ui,"
+    "sans-serif}.wrap{max-width:720px;margin:0 auto;padding:32px 20px}"
+    "h1{font-size:24px}a{color:#58a6ff}.log{border:1px solid #2a3441;background:#1a212b;"
+    "border-radius:12px;padding:16px;height:52vh;overflow-y:auto;display:flex;"
+    "flex-direction:column;gap:10px;margin:16px 0}.msg{max-width:80%;padding:10px 14px;"
+    "border-radius:14px;white-space:pre-wrap}.agent{align-self:flex-start;background:#1f2a37}"
+    ".you{align-self:flex-end;background:rgba(88,166,255,.16)}form{display:flex;gap:10px}"
+    "input{flex:1;padding:12px;border-radius:10px;border:1px solid #2a3441;background:#0d1117;"
+    "color:#e6edf3}button{padding:10px 16px;border-radius:10px;border:1px solid #2a3441;"
+    "background:#22303f;color:#e6edf3;font-weight:600;cursor:pointer}</style></head>"
+    "<body><div class=wrap><h1>SalesFlow AI — talk to Alex</h1>"
+    "<p>React UI not built — serving the lightweight fallback chat. "
+    "Build the SPA for the voice + dashboard experience: "
+    "<code>cd frontend && npm install && npm run build</code>.</p>"
     "<div id=log class=log></div>"
-    "<form id=f class=composer>"
-    "<input id=m autocomplete=off placeholder='Type what the parent says…'>"
-    "<button id=send class=btn>Send</button></form>"
-    "<p class=tips>Try: <code>How much does it cost?</code> "
-    "<code>It's too expensive</code> <code>Can I talk to a human?</code> "
-    "<code>What's your refund policy?</code> <code>Not interested, no kids</code></p>"
-    "<p class=foot>JSON API · POST /api/start · POST /api/chat "
-    "{session_id,message} · health /healthz</p>"
-    "</div><script>" + _SCRIPT + "</script></body></html>"
+    "<form id=f><input id=m autocomplete=off placeholder='Type what the parent says…'>"
+    "<button>Send</button></form></div><script>"
+    "const log=document.getElementById('log'),f=document.getElementById('f'),"
+    "m=document.getElementById('m');let sid=null,done=false;"
+    "function b(r,t){const d=document.createElement('div');d.className='msg '+r;"
+    "d.textContent=t;log.appendChild(d);log.scrollTop=log.scrollHeight;}"
+    "async function start(){const r=await fetch('/api/start',{method:'POST'});"
+    "const d=await r.json();sid=d.session_id;b('agent',d.reply);}"
+    "f.addEventListener('submit',async e=>{e.preventDefault();const t=m.value.trim();"
+    "if(!t||done)return;b('you',t);m.value='';"
+    "const r=await fetch('/api/chat',{method:'POST',headers:{'Content-Type':'application/json'},"
+    "body:JSON.stringify({session_id:sid,message:t})});const d=await r.json();"
+    "if(d.error){b('agent',d.error);return;}b('agent',d.reply);"
+    "if(d.terminal){done=true;b('agent','(call ended: '+d.outcome+')');}});start();"
+    "</script></body></html>"
 )
 
 

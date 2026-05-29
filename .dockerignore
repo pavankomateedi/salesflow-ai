@@ -16,3 +16,6 @@ tests/
 *.md
 !README.md
 *.pdf
+frontend/node_modules/
+frontend/dist/
+frontend/.vite/

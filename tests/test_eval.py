@@ -73,4 +73,15 @@ def test_transcript_serialises_round_trip(tmp_path) -> None:
     data = json.loads(path.read_text(encoding="utf-8"))
     assert data["agent_version"] == log.agent_version
     assert data["turns"]
+    assert data["redacted"] is True  # stored transcript DB is PII-protected
     assert to_dict(log)["session_id"] == log.session_id
+
+
+def test_dashboard_data_assembles() -> None:
+    from salesflow.eval.dashboard import build_dashboard
+
+    d = build_dashboard(n_ab=40)
+    assert d["agent_version"]
+    assert isinstance(d["kpis"], dict) and d["kpis"]
+    assert d["ab"]["variants"] and d["ab"]["best"]
+    assert d["sample_transcript"]["redacted"] is True

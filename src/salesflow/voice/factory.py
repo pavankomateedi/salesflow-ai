@@ -16,10 +16,25 @@ from __future__ import annotations
 
 import os
 
-from salesflow.voice.interfaces import STT
-from salesflow.voice.mock import MockSTT
+from salesflow.voice.interfaces import STT, TTS
+from salesflow.voice.mock import MockSTT, MockTTS
 
 _ALIASES = {"faster-whisper": "local", "faster_whisper": "local", "whisper": "local"}
+
+
+def voice_available() -> bool:
+    """True when a live voice backend (Cartesia) is usable (key present)."""
+    return bool(os.environ.get("CARTESIA_API_KEY"))
+
+
+def get_tts(provider: str | None = None) -> TTS:
+    """Return a TTS backend. ``auto`` uses Cartesia when a key is set, else mock."""
+    name = (provider or os.environ.get("SALESFLOW_TTS", "auto")).strip().lower()
+    if name == "cartesia" or (name == "auto" and voice_available()):
+        from salesflow.voice.live_cartesia import CartesiaTTS
+
+        return CartesiaTTS()
+    return MockTTS()
 
 
 def get_stt(provider: str | None = None) -> STT:

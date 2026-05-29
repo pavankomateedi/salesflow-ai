@@ -32,10 +32,10 @@ def test_healthz(client: TestClient) -> None:
 
 
 def test_home_page_renders(client: TestClient) -> None:
+    # Serves the built React SPA when present, else the vanilla fallback chat.
     r = client.get("/")
     assert r.status_code == 200
-    assert "talk to Alex" in r.text
-    assert "/api/chat" in r.text  # the page wires the JSON API
+    assert "SalesFlow AI" in r.text
 
 
 def test_start_returns_opening_and_session(client: TestClient) -> None:
@@ -88,3 +88,47 @@ def test_chat_after_terminal_is_409(client: TestClient) -> None:
     client.post("/api/chat", json={"session_id": sid, "message": "Can I talk to a human?"})
     r = client.post("/api/chat", json={"session_id": sid, "message": "still there?"})
     assert r.status_code == 409
+
+
+def test_api_kpis_shape(client: TestClient) -> None:
+    d = client.get("/api/kpis?n_ab=40").json()
+    assert d["agent_version"]
+    assert d["kpis"] and isinstance(d["kpis"], dict)
+    assert d["hallucination_rate"] == 0.0  # grounded by construction
+    assert d["ab"]["best"]
+    assert d["sample_transcript"]["redacted"] is True
+
+
+def test_voice_status_reports_backend(client: TestClient) -> None:
+    d = client.get("/api/voice/status").json()
+    assert "available" in d and "tts" in d and "stt" in d
+
+
+def test_ws_voice_text_loop_is_grounded(client: TestClient) -> None:
+    with client.websocket_connect("/ws/voice") as ws:
+        opening = ws.receive_json()
+        assert opening["type"] == "reply"
+        assert opening["phase"] == "warmup"
+        ws.send_json({"type": "utterance", "text": "How much does it cost?"})
+        reply = ws.receive_json()
+        assert reply["type"] == "reply"
+        assert reply["transcript"] == "How much does it cost?"
+        assert "pricing-config" in reply["grounded_sources"]
+
+
+def test_ws_voice_escalation_emits_ended(client: TestClient) -> None:
+    with client.websocket_connect("/ws/voice") as ws:
+        ws.receive_json()  # opening
+        ws.send_json({"type": "utterance", "text": "Can I talk to a human?"})
+        reply = ws.receive_json()
+        assert reply["escalation"] == "explicit_request"
+        ended = ws.receive_json()
+        assert ended["type"] == "ended"
+        assert ended["outcome"] == "escalated"
+
+
+def test_ws_voice_barge_is_acked(client: TestClient) -> None:
+    with client.websocket_connect("/ws/voice") as ws:
+        ws.receive_json()  # opening
+        ws.send_json({"type": "barge"})
+        assert ws.receive_json()["type"] == "barge_ack"

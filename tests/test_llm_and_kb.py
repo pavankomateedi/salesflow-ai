@@ -10,13 +10,13 @@ from salesflow.llm.base import Message
 
 
 def test_factory_returns_mock_when_no_key(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
     client = get_client()
     assert client.name == "mock"
 
 
 def test_force_mock_even_with_key(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-fake")
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-fake")
     assert get_client(prefer_live=False).name == "mock"
 
 
@@ -41,8 +41,8 @@ def test_kb_parses_every_arc_rebuttal() -> None:
 
 def test_live_backend_is_importable() -> None:
     # Construction must fail cleanly (not import-error) without a key.
-    from salesflow.llm.anthropic_client import AnthropicClient
+    from salesflow.llm.openai_client import OpenAIClient
 
-    if not os.environ.get("ANTHROPIC_API_KEY"):
+    if not os.environ.get("OPENAI_API_KEY"):
         with pytest.raises(RuntimeError):
-            AnthropicClient()
+            OpenAIClient()

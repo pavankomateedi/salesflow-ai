@@ -16,7 +16,7 @@ dependencies = [
 
 [project.optional-dependencies]
 # Real LLM backend — optional so the harness + tests run fully offline.
-llm = ["anthropic>=0.40"]
+llm = ["openai>=1.0"]
 # Live voice pipeline adapters — optional. Cartesia covers TTS + STT
 # (Ink-Whisper); groq and faster-whisper are alternative STT backends.
 voice = ["cartesia>=1.0", "groq>=0.11"]
@@ -46,7 +46,7 @@ salesflow = ["knowledge/data/*.md", "eval/goldens/*.yaml"]
 testpaths = ["tests"]
 addopts = "-q --strict-markers"
 markers = [
-    "live: tests that require a real ANTHROPIC_API_KEY (skipped offline)",
+    "live: tests that require a real OPENAI_API_KEY (skipped offline)",
 ]
 
 [tool.coverage.run]

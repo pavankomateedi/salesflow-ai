@@ -117,3 +117,54 @@ local latency depends on hardware. Cartesia (default) is true streaming.
 
 **Why:** They serialise to readable strings in transcripts/JSON and the golden
 set, while still being type-checked. (Also what ruff's `UP042` wants.)
+
+## LLM backend is OpenAI, behind the same protocol
+
+**Decision:** The optional LLM layer is OpenAI GPT (`llm/openai_client.py`),
+selected by `OPENAI_API_KEY`; the mock backs every test.
+
+**Why:** Matches the platform's stated stack. The swap is fully contained behind
+the `LLMClient` protocol — the deterministic core, golden set, and gates never
+touch it, because the LLM only does optional phrasing. OpenAI auto-caches the
+stable system prefix, so no explicit cache-control wiring is needed.
+
+## Competitive questions are grounded, not just objection-handled
+
+**Decision:** A competitive-intent route retrieves from `competitive.md` and
+tags `grounded_sources=["competitive"]`. A competitor *name* ("Wyzant") still
+classifies as a COMPETITOR objection first (A-R-C).
+
+**Why:** `competitive.md` was loaded but never retrieved — neutral "how are you
+different?" questions got no grounded answer. The PRD explicitly lists
+competitive Q&A; this closes it without breaking objection handling.
+
+## Live voice is a server-side Cartesia WebSocket loop
+
+**Decision:** `/ws/voice` orchestrates STT → deterministic agent → TTS. Cartesia
+powers STT (Ink-Whisper) and TTS (Sonic) when `CARTESIA_API_KEY` is set; offline
+it runs the mock (text replies, no synthesised audio). The React voice page
+captures mic PCM, plays returned audio, and signals barge-in.
+
+**Why:** The PRD's headline is real-time voice. Keeping the loop behind the voice
+protocols means the turn-taking, barge-in, and decision events are testable with
+the mock (TestClient WebSocket), and going live is just providing the key. The
+live Cartesia calls themselves are unverifiable without a key — see LIMITATIONS.
+
+## PII-protected transcript store
+
+**Decision:** `save_transcript` redacts by default (`privacy.py`): emails, phone
+numbers, and known name values are masked before anything is written to disk.
+
+**Why:** The PRD requires a *PII-protected* transcript database. Masking at write
+time means raw personal data never lands on disk; deterministic masking keeps the
+observability tests exact-match.
+
+## React SPA served by FastAPI, with a no-build fallback
+
+**Decision:** A Vite/React app (`frontend/`) is built to `frontend/dist` and
+served by FastAPI; when no build is present, `/` serves a self-contained vanilla
+chat page.
+
+**Why:** React matches the stated dev-tool stack and suits the richer dashboard +
+voice UI. The fallback keeps `/` working in CI and bare checkouts (no Node), so
+the Python gates never depend on a frontend build.

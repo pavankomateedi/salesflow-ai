@@ -34,6 +34,15 @@ _POLICY_INTENT = (
     "cancel", "cancellation", "refund", "contract", "recording", "privacy",
     "guarantee", "reschedule", "match", "subjects", "grades", "ferpa", "data",
 )
+# Competitive questions -> grounded battlecard retrieval (competitive.md). A
+# question naming a competitor ("Wyzant") is still caught as a COMPETITOR
+# objection first; these cues catch the neutral "how are you different" framing.
+_COMPETITIVE_INTENT = (
+    "different from", "difference between", "how are you different", "compare",
+    "comparison", "better than", "versus", " vs ", "what makes you", "why should i",
+    "why nerdy", "stand out", "other services", "other tutoring", "self-service",
+    "in-person", "in person", "local tutor", "local tutoring", "another service",
+)
 # Specific facts we deliberately do not hold; a question hitting these escalates
 # as low-confidence rather than being answered from a loosely-matching chunk.
 _OUT_OF_SCOPE = (
@@ -175,6 +184,14 @@ class SalesAgent:
                 top = chunks[0]
                 return top.body, [top.source], False
             return None, [], True  # unanswerable policy question -> escalate
+        # Competitive questions: grounded battlecard retrieval. Soft — a miss just
+        # proceeds (no escalation), since a differentiation question is not a
+        # high-stakes factual gap the way an unanswerable policy question is.
+        if is_question and any(cue in low for cue in _COMPETITIVE_INTENT):
+            comp = [c for c in self.kb.retrieve(text, k=3) if c.source == "competitive"]
+            if comp:
+                return comp[0].body, ["competitive"], False
+            return None, [], False
         return None, [], False
 
     def _advance(
