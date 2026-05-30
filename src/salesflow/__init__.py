@@ -8,7 +8,7 @@ surfaces (utterance phrasing, sentiment, the post-call judge) behind the
 when no API key is present.
 """
 
-AGENT_VERSION = "alex-v1.0.0"
+AGENT_VERSION = "vani-v1.0.0"
 """Per-call version tag stamped onto every transcript and decision log."""
 
 __all__ = ["AGENT_VERSION"]

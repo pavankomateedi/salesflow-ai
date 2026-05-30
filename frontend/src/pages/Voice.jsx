@@ -167,13 +167,13 @@ export default function Voice() {
         <span className={`pill ${available ? "good" : "warn"}`}>
           {available ? "Cartesia voice live" : "no voice key — text fallback"}
         </span>
-        {agentSpeaking && <span className="pill">Alex speaking…</span>}
+        {agentSpeaking && <span className="pill">Vani speaking…</span>}
         {listening && <span className="pill good">listening…</span>}
         {status && <span className="muted">{status.note}</span>}
       </div>
 
       <div className="log" ref={logRef}>
-        {messages.length === 0 && <div className="center">Connecting… Alex will greet you.</div>}
+        {messages.length === 0 && <div className="center">Connecting… Vani will greet you.</div>}
         {messages.map((m, i) => (
           <div key={i} className={`msg ${m.role}`}>
             {m.text}

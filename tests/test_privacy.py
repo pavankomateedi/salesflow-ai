@@ -33,7 +33,7 @@ def test_to_dict_redacts_pii_in_transcript() -> None:
     call = CallLog(
         session_id="s1",
         phone="+15551234567",
-        agent_version="alex-v1.0.0",
+        agent_version="vani-v1.0.0",
         turns=turns,
         outcome=Outcome.IN_PROGRESS,
         final_phase=Phase.DISCOVERY,

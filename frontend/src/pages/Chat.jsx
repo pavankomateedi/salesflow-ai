@@ -60,7 +60,7 @@ export default function Chat() {
     <div>
       <h1>Text chat</h1>
       <p className="sub">
-        Talk to Alex by typing what a parent would say. Pricing is grounded from config,
+        Talk to Vani by typing what a parent would say. Pricing is grounded from config,
         policy &amp; competitive answers are retrieval-only — every reply shows its decision trace.
       </p>
       <div className="statusbar">

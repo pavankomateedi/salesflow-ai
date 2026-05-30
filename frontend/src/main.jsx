@@ -12,7 +12,7 @@ function Shell() {
       <header className="topbar">
         <div className="brand">
           SalesFlow <span className="accent">AI</span>
-          <span className="agent-tag">Alex · alex-v1.0.0</span>
+          <span className="agent-tag">Vani · vani-v1.0.0</span>
         </div>
         <nav className="nav">
           <NavLink to="/" end>Chat</NavLink>

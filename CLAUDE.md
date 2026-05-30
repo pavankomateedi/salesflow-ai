@@ -1,6 +1,6 @@
 # SalesFlow AI — Context
 
-Autonomous voice sales agent **"Alex"** for Nerdy/Varsity Tutors (Gauntlet Week 5,
+Autonomous voice sales agent **"Vani"** for Nerdy/Varsity Tutors (Gauntlet Week 5,
 Part 2 of `nerdy-gauntlet-prd.md`). Built **eval-first**: the golden set is the
 executable spec, the harness runs every scenario, KPI scorers + a grounding judge
 are the quality gates.

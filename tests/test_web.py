@@ -104,6 +104,15 @@ def test_voice_status_reports_backend(client: TestClient) -> None:
     assert "available" in d and "tts" in d and "stt" in d
 
 
+def test_status_reports_persona_llm_and_voice(client: TestClient) -> None:
+    d = client.get("/api/status").json()
+    assert d["agent_persona"] == "Vani"
+    assert d["agent_version"] == "vani-v1.0.0"
+    assert "backend" in d["llm"]
+    assert "available" in d["voice"]
+    assert d["live_calls_recorded"] >= 0
+
+
 def test_ws_voice_text_loop_is_grounded(client: TestClient) -> None:
     with client.websocket_connect("/ws/voice") as ws:
         opening = ws.receive_json()

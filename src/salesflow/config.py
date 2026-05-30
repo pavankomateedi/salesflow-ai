@@ -46,7 +46,7 @@ class Settings:
     thresholds: Thresholds = field(default_factory=Thresholds)
     # Recording disclosure auto-played at connection (TCPA).
     recording_disclosure: str = (
-        "Hi, this is Alex from Nerdy. This call may be recorded for quality. "
+        "Hi, this is Vani from Nerdy. This call may be recorded for quality. "
     )
 
 

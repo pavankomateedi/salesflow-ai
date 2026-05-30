@@ -1,6 +1,6 @@
 # SalesFlow AI
 
-An autonomous voice sales agent (persona **Alex**) for Nerdy tutoring, built
+An autonomous voice sales agent (persona **Vani**) for Nerdy tutoring, built
 **eval-first**: the golden set, self-play harness, KPI scorers, grounding judge,
 and quality gates came before the feature work, so every behaviour is measured
 rather than vibe-checked. Implements Part 2 of the Nerdy Gauntlet PRD.

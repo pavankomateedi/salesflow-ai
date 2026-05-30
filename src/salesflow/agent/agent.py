@@ -90,7 +90,7 @@ class SalesAgent:
         *,
         settings: Settings = SETTINGS,
         playbook: Playbook | None = None,
-        version: str = "alex-v1.0.0",
+        version: str = "vani-v1.0.0",
         llm: LLMClient | None = None,
     ) -> None:
         self.kb = kb or KnowledgeBase()
@@ -151,14 +151,61 @@ class SalesAgent:
         # Record the field we were waiting on as collected, unless this turn is
         # really an objection or a disqualification rather than an answer.
         last_asked = state.asked_fields[-1] if state.asked_fields else None
-        if last_asked and not state.lead.is_known(last_asked):
-            value = analysis.extracts_field(last_asked, text)
-            if value and classify_objection(text) is None and not analysis.is_disqualifying(text):
+        if (
+            last_asked
+            and not state.lead.is_known(last_asked)
+            and classify_objection(text) is None
+            and not analysis.is_disqualifying(text)
+        ):
+            value = self._extract_field_value(last_asked, text)
+            if value:
                 state.lead.collected[last_asked] = value
         state.add_turn(
             Turn(speaker="prospect", text=text, phase=state.phase,
                  sentiment=analysis.score_sentiment(text))
         )
+
+    def _extract_field_value(self, field: str, text: str) -> str | None:
+        """Pull the canonical value for ``field`` out of the parent's reply.
+
+        Voice-transcribed replies are noisy: filler ("um", "mm-hmm"), self-
+        corrections ("not Mr. B, it's Mr. V"), and off-topic asides routinely
+        end up where a clean value belongs. With a live LLM we ask it to
+        extract just the value (or return ``NO_ANSWER`` for filler so the field
+        stays empty and the agent re-asks). With the mock backend we keep the
+        original naive behavior so the test suite stays deterministic.
+        """
+        if self.llm.name == "mock":
+            return analysis.extracts_field(field, text)
+        try:
+            system = (
+                "You extract a single structured field value from a parent's spoken "
+                "reply during a tutoring sales call. The reply may include filler "
+                "('um', 'mm-hmm', 'yeah'), self-corrections (\"not X, it's Y\"), or "
+                "off-topic asides. Extract ONLY the canonical value for the requested "
+                "field, in its minimal natural form (e.g. 'Mr. V', '8th grade', "
+                "'math and chemistry', 'STAR test in April', 'pavan@example.com'). "
+                "If the parent did NOT actually answer (only filler or unrelated), "
+                "reply with the literal string NO_ANSWER. Output ONLY the value or "
+                "NO_ANSWER — no quotes, no prefix, no punctuation around it."
+            )
+            user = (
+                f"Field being asked: {field}\n"
+                f"Parent reply: {text!r}\n"
+                "Canonical value:"
+            )
+            resp = self.llm.complete(
+                system=system,
+                messages=[Message(role="user", content=user)],
+                max_tokens=60,
+                temperature=0.0,
+            )
+            value = resp.text.strip().strip('"').strip("'").rstrip(".").strip()
+            if not value or value.upper() == "NO_ANSWER":
+                return None
+            return value
+        except Exception:
+            return analysis.extracts_field(field, text)
 
     def _update_signals(
         self, state: ConversationState, text: str, sentiment: Sentiment
@@ -343,12 +390,60 @@ class SalesAgent:
         return action
 
     def _build_recap(self, state: ConversationState) -> str:
-        """Build the pivot recap using every field actually collected.
+        """Build the pivot recap.
 
-        Earlier versions hardcoded ``student_name`` and dropped subjects, grade,
-        urgency etc., so prospects saw a vague summary. This pulls everything
-        the agent gathered so the recap actually reflects the conversation.
+        Two-stage: a deterministic template assembles the collected facts (so
+        the recap is always grounded), then — when a live LLM is available —
+        an "LLM review" pass rewrites it into a single, natural paragraph that
+        feels human rather than a fill-in-the-blanks summary. Guardrails reject
+        the LLM rewrite if it drops the closing question or invents a ``$NN``
+        figure that wasn't in the facts.
         """
+        template = self._build_recap_template(state)
+        if self.llm.name == "mock":
+            return template
+        try:
+            facts = "\n".join(
+                f"- {k}: {v}" for k, v in state.lead.all_fields.items() if v
+            )
+            recent = "\n".join(
+                f"  {t.speaker}: {t.text}" for t in state.turns[-6:]
+            )
+            system = (
+                "You are Vani, a warm tutoring sales rep at Nerdy, about to ask "
+                "the parent to commit to scheduling the first session. Produce a "
+                "single short paragraph (2-3 sentences) that:\n"
+                "1. Briefly summarises the parent's situation using ONLY the facts "
+                "below. Do NOT invent any facts, names, grades, subjects, or "
+                "details that are not in the facts list.\n"
+                "2. Reassures with the standing offer: month-to-month, refundable "
+                "first session, and a matched tutor within 48 hours.\n"
+                "3. Ends with ONE closing question that asks to schedule the first "
+                "session.\n"
+                "Tone: warm, calm, concise. No bullet points. No dollar figures."
+            )
+            user = (
+                f"Collected facts:\n{facts or '- (no facts collected)'}\n\n"
+                f"Last few turns of the call:\n{recent}\n\n"
+                f"Fallback template (only use as a structural guide): {template}\n\n"
+                "Your recap:"
+            )
+            resp = self.llm.complete(
+                system=system,
+                messages=[Message(role="user", content=user)],
+                max_tokens=200,
+                temperature=0.4,
+            )
+            text = resp.text.strip().strip('"').strip("'")
+            # Guardrails: must end with a closing question; recap must not invent
+            # dollar figures (pricing is handled separately, never in the recap).
+            if "?" not in text or re.search(r"\$\d+", text):
+                return template
+            return text or template
+        except Exception:
+            return template
+
+    def _build_recap_template(self, state: ConversationState) -> str:
         f = state.lead.all_fields
         name = f.get("student_name") or "your student"
         parts: list[str] = [f"tutoring for {name}"]
@@ -370,7 +465,7 @@ class SalesAgent:
     def _naturalize(
         self, base: str, state: ConversationState, asked_field: str | None
     ) -> str:
-        """Rewrite a planned line conversationally, in Alex's voice.
+        """Rewrite a planned line conversationally, in Vani's voice.
 
         Constraints kept hard so the LLM cannot drift off grounded facts:
           * Any ``$NN`` figure in the planned line must remain in the rewrite
@@ -384,7 +479,7 @@ class SalesAgent:
             return base
         try:
             system = (
-                "You are Alex, a warm and professional tutoring sales rep at Nerdy. "
+                "You are Vani, a warm and professional tutoring sales rep at Nerdy. "
                 "Rewrite the agent's planned next line so it sounds natural and "
                 "conversational, briefly acknowledging what the parent just said when "
                 "relevant. One or two sentences max, calm and human. "

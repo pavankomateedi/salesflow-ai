@@ -36,7 +36,7 @@ from salesflow.llm import get_client
 from salesflow.voice.factory import get_stt, get_tts, voice_available
 from salesflow.voice.interfaces import AudioChunk
 
-app = FastAPI(title="SalesFlow AI — Alex", version=AGENT_VERSION)
+app = FastAPI(title="SalesFlow AI — Vani", version=AGENT_VERSION)
 
 # Live agent uses OpenAI when OPENAI_API_KEY is set (natural phrasing); mock
 # otherwise. Tests still construct ``SalesAgent()`` directly => mock => no LLM
@@ -156,6 +156,33 @@ def voice_status() -> JSONResponse:
     )
 
 
+@app.get("/api/status")
+def status() -> JSONResponse:
+    """All-backend status: confirms the LLM phrasing layer + Cartesia voice are
+    actually wired into the running process. If ``llm.backend == "mock"`` the
+    natural phrasing / smart extraction / LLM recap are off — most likely
+    because ``OPENAI_API_KEY`` wasn't exported into the shell before uvicorn started.
+    """
+    return JSONResponse(
+        {
+            "agent_version": AGENT_VERSION,
+            "agent_persona": "Vani",
+            "llm": {
+                "backend": _agent.llm.name,
+                "natural_phrasing": _agent.llm.name != "mock",
+                "smart_extraction": _agent.llm.name != "mock",
+                "llm_recap_review": _agent.llm.name != "mock",
+            },
+            "voice": {
+                "available": voice_available(),
+                "stt": "cartesia" if voice_available() else "mock",
+                "tts": "cartesia" if voice_available() else "mock",
+            },
+            "live_calls_recorded": len(_LIVE_CALLS),
+        }
+    )
+
+
 # --- WebSocket voice loop --------------------------------------------------
 
 
@@ -263,7 +290,7 @@ def main() -> None:  # pragma: no cover - thin uvicorn launcher
 _FALLBACK_PAGE = (
     "<!doctype html><html lang=en><head><meta charset=utf-8>"
     "<meta name=viewport content='width=device-width,initial-scale=1'>"
-    "<title>SalesFlow AI — Alex</title>"
+    "<title>SalesFlow AI — Vani</title>"
     "<style>body{margin:0;color:#f1f5f9;font:15px/1.5 system-ui,sans-serif;min-height:100vh;"
     "background:radial-gradient(ellipse 1000px 700px at -5% 5%,"
     "rgba(34,211,238,.40),transparent 55%),"
@@ -290,7 +317,7 @@ _FALLBACK_PAGE = (
     "button{padding:10px 18px;border-radius:12px;border:0;color:#06121f;font-weight:700;"
     "cursor:pointer;background:linear-gradient(135deg,#22d3ee,#8b5cf6 65%,#ec4899);"
     "box-shadow:0 10px 24px rgba(34,211,238,.25)}</style></head>"
-    "<body><div class=wrap><h1>SalesFlow AI — talk to Alex</h1>"
+    "<body><div class=wrap><h1>SalesFlow AI — talk to Vani</h1>"
     "<p>React UI not built — serving the lightweight fallback chat. "
     "Build the SPA for the voice + dashboard experience: "
     "<code>cd frontend &amp;&amp; npm install &amp;&amp; npm run build</code>.</p>"
