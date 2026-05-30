@@ -69,6 +69,41 @@ def test_ab_playbook_override_swaps_rebuttal_text() -> None:
     assert "variant" in action.grounded_sources
 
 
+def test_recap_is_not_re_appended_on_follow_up_questions() -> None:
+    """User complaint: once in PIVOT_TO_CLOSE the agent re-appended the full
+    recap to every grounded reply. After the first recap, follow-up questions
+    must get just the grounded answer plus a short close — no recap repeat."""
+    agent = SalesAgent()
+    lead = Lead(
+        phone="+15550008888",
+        known={
+            "student_name": "Mia",
+            "grade_level": "8th",
+            "subjects": "math",
+            "performance_level": "C",
+            "parent_contact": "mia@example.com",
+            "urgency": "soon",
+            "prior_tutoring": "no",
+            "test_deadline": "May",
+            "schedule_windows": "evenings",
+            "decision_maker": "me",
+            "budget_signal": "200",
+        },
+    )
+    state = ConversationState(lead=lead)
+    agent.open(state)
+    # First turn -> PIVOT_TO_CLOSE, recap fires.
+    first = agent.respond(state, "yes, this sounds great")
+    assert first.phase == Phase.PIVOT_TO_CLOSE
+    assert "So to recap" in first.utterance
+    # Follow-up grounded question while still in pivot phase: must NOT re-recap.
+    second = agent.respond(state, "How are you different from a local in-person tutor?")
+    assert second.phase == Phase.PIVOT_TO_CLOSE
+    assert "national tutor pool" in second.utterance.lower()  # competitive answer present
+    assert "So to recap" not in second.utterance  # the bug we just fixed
+    assert "Shall we get the first session scheduled?" in second.utterance
+
+
 def test_pivot_recap_includes_every_collected_field() -> None:
     """The PRD's recap must reflect what the agent actually gathered, not a
     hardcoded student_name. Earlier the user saw subjects dropped from the recap."""

@@ -301,9 +301,11 @@ class SalesAgent:
     def _pivot_or_close(
         self, state: ConversationState, *, pivot_signals: dict[str, bool], prefix: str | None
     ) -> AgentAction:
-        # If we already pivoted and the prospect just gave positive intent, close.
         last_prospect = state.prospect_turns[-1].text if state.prospect_turns else ""
-        if state.phase == Phase.PIVOT_TO_CLOSE and analysis.is_positive_intent(last_prospect):
+        already_pivoted = state.phase == Phase.PIVOT_TO_CLOSE
+
+        # If we already pivoted and the prospect just gave positive intent, close.
+        if already_pivoted and analysis.is_positive_intent(last_prospect):
             state.phase = Phase.CLOSE
             state.outcome = Outcome.CLOSED_WON
             action = AgentAction(
@@ -317,18 +319,45 @@ class SalesAgent:
             self._record(state, action)
             return action
 
-        # Pivoting again without a commitment is an unproductive turn; count it
-        # as a probe so a prospect who never commits eventually escalates as
-        # disqualification-uncertainty rather than looping forever.
-        if state.phase == Phase.PIVOT_TO_CLOSE:
-            state.probe_attempts += 1
         state.phase = Phase.PIVOT_TO_CLOSE
-        summary = self._build_recap(state)
-        utterance = f"{prefix} {summary}".strip() if prefix else summary
+        short_close = "Shall we get the first session scheduled?"
+
+        # First entry into PIVOT_TO_CLOSE -> the full recap. Subsequent turns must
+        # NOT re-recap (was annoying users who asked grounded follow-up questions
+        # like "How are you different from a local tutor?" and got the full recap
+        # appended to every reply).
+        if not already_pivoted:
+            summary = self._build_recap(state)
+            utterance = f"{prefix} {summary}".strip() if prefix else summary
+            action = AgentAction(
+                utterance=utterance,
+                phase=Phase.PIVOT_TO_CLOSE,
+                decision={"step": "pivot", "pivot": pivot_signals},
+            )
+            self._record(state, action)
+            return action
+
+        # Re-pivot path: prospect engaged with a follow-up after the recap.
+        # If they asked a grounded question (prefix is set), surface the answer
+        # plus a short close. Only count as a probe when the turn was empty of
+        # productive content, so escalation still fires for true non-committers.
+        if prefix:
+            utterance = f"{prefix} {short_close}".strip()
+            action = AgentAction(
+                utterance=utterance,
+                phase=Phase.PIVOT_TO_CLOSE,
+                decision={"step": "answer_then_close", "pivot": pivot_signals},
+            )
+            self._record(state, action)
+            return action
+
+        state.probe_attempts += 1
         action = AgentAction(
-            utterance=utterance,
+            utterance=(
+                "Based on what you've shared, this sounds like a strong fit. " + short_close
+            ),
             phase=Phase.PIVOT_TO_CLOSE,
-            decision={"step": "pivot", "pivot": pivot_signals},
+            decision={"step": "re_pivot", "pivot": pivot_signals},
         )
         self._record(state, action)
         return action
