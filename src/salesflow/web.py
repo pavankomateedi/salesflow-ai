@@ -17,10 +17,10 @@ runs with no API key; OpenAI/Cartesia only upgrade phrasing and voice.
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import os
 import uuid
-from functools import lru_cache
 from pathlib import Path
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
@@ -30,15 +30,43 @@ from pydantic import BaseModel
 
 from salesflow import AGENT_VERSION
 from salesflow.agent.agent import AgentAction, SalesAgent
-from salesflow.domain.models import ConversationState, Lead
+from salesflow.domain.models import CallLog, ConversationState, Lead
 from salesflow.eval.dashboard import build_dashboard
+from salesflow.llm import get_client
 from salesflow.voice.factory import get_stt, get_tts, voice_available
 from salesflow.voice.interfaces import AudioChunk
 
 app = FastAPI(title="SalesFlow AI — Alex", version=AGENT_VERSION)
 
-_agent = SalesAgent()
+# Live agent uses OpenAI when OPENAI_API_KEY is set (natural phrasing); mock
+# otherwise. Tests still construct ``SalesAgent()`` directly => mock => no LLM
+# calls in the suite, so determinism is preserved.
+_agent = SalesAgent(llm=get_client())
 _SESSIONS: dict[str, ConversationState] = {}
+# Real calls that ran on this server, captured at terminal state and shown on
+# the dashboard alongside the synthetic baseline.
+_LIVE_CALLS: list[CallLog] = []
+_RECORDED: set[str] = set()
+
+
+def _record_if_terminal(session_id: str, state: ConversationState) -> None:
+    """Snapshot the call into the live-stats store once it reaches a terminal state."""
+    if not state.phase.is_terminal or session_id in _RECORDED:
+        return
+    _LIVE_CALLS.append(
+        CallLog(
+            session_id=session_id,
+            phone=state.lead.phone,
+            agent_version=AGENT_VERSION,
+            turns=list(state.turns),
+            outcome=state.outcome,
+            final_phase=state.phase,
+            escalation_trigger=state.escalation_trigger,
+            collected_fields=dict(state.lead.all_fields),
+            decisions=[t.decision for t in state.turns if t.speaker == "agent" and t.decision],
+        )
+    )
+    _RECORDED.add(session_id)
 
 _DEFAULT_DIST = Path(__file__).resolve().parents[2] / "frontend" / "dist"
 _FRONTEND_DIST = Path(os.environ.get("SALESFLOW_FRONTEND_DIST", str(_DEFAULT_DIST)))
@@ -98,17 +126,18 @@ def chat(req: ChatRequest) -> JSONResponse:
         return JSONResponse(
             {"error": "this call has ended — start a new one", "terminal": True}, status_code=409
         )
-    return JSONResponse(_payload(state, _agent.respond(state, req.message)))
-
-
-@lru_cache(maxsize=4)
-def _kpis(n_ab: int) -> dict[str, object]:
-    return build_dashboard(n_ab=n_ab)
+    action = _agent.respond(state, req.message)
+    _record_if_terminal(req.session_id, state)
+    return JSONResponse(_payload(state, action))
 
 
 @app.get("/api/kpis")
 def api_kpis(n_ab: int = 200) -> JSONResponse:
-    return JSONResponse(_kpis(max(20, min(2000, n_ab))))
+    """Dynamic dashboard data: live calls + synthetic baseline. Not cached so
+    each request reflects the most recent terminated calls on this server."""
+    return JSONResponse(
+        build_dashboard(n_ab=max(20, min(2000, n_ab)), live_calls=list(_LIVE_CALLS))
+    )
 
 
 @app.get("/api/voice/status")
@@ -146,8 +175,9 @@ async def _send_audio(ws: WebSocket, text: str) -> None:
 @app.websocket("/ws/voice")
 async def ws_voice(ws: WebSocket) -> None:
     await ws.accept()
+    session_id = uuid.uuid4().hex
     state = ConversationState(lead=Lead(phone=_new_phone()))
-    opening = _agent.open(state)
+    opening = await asyncio.to_thread(_agent.open, state)
     await ws.send_json({"type": "reply", "transcript": None, **_payload(state, opening)})
     await _send_audio(ws, opening.utterance)
 
@@ -165,17 +195,32 @@ async def ws_voice(ws: WebSocket) -> None:
             text = msg.get("text") or ""
             if not text and msg.get("audio_b64"):
                 pcm = base64.b64decode(msg["audio_b64"])
-                text = get_stt().transcribe(AudioChunk(duration_ms=0, pcm=pcm)).text
+                rate = int(msg.get("sample_rate") or 16000)
+                try:
+                    transcript = await asyncio.to_thread(
+                        get_stt().transcribe,
+                        AudioChunk(duration_ms=0, pcm=pcm, sample_rate=rate),
+                    )
+                    text = transcript.text
+                except Exception as exc:
+                    # Don't crash the websocket on a single STT failure — the user
+                    # would just see "disconnected" and lose the call. Surface the
+                    # error and keep the loop alive so they can retry.
+                    await ws.send_json({"type": "audio_error", "detail": f"STT: {exc}"})
+                    continue
             if not text.strip():
                 continue
             if state.phase.is_terminal:
                 await ws.send_json({"type": "ended", "outcome": state.outcome.value})
                 break
 
-            action = _agent.respond(state, text)
+            # Sync agent call (incl. optional LLM phrasing) goes off the event loop
+            # so concurrent websocket connections don't block one another.
+            action = await asyncio.to_thread(_agent.respond, state, text)
             await ws.send_json({"type": "reply", "transcript": text, **_payload(state, action)})
             await _send_audio(ws, action.utterance)
             if state.phase.is_terminal:
+                _record_if_terminal(session_id, state)
                 await ws.send_json({"type": "ended", "outcome": state.outcome.value})
                 break
     except WebSocketDisconnect:

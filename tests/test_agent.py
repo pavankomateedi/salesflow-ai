@@ -69,6 +69,40 @@ def test_ab_playbook_override_swaps_rebuttal_text() -> None:
     assert "variant" in action.grounded_sources
 
 
+def test_pivot_recap_includes_every_collected_field() -> None:
+    """The PRD's recap must reflect what the agent actually gathered, not a
+    hardcoded student_name. Earlier the user saw subjects dropped from the recap."""
+    agent = SalesAgent()
+    lead = Lead(
+        phone="+15550009999",
+        known={
+            "student_name": "Mia",
+            "grade_level": "8th",
+            "subjects": "math and chemistry",
+            "performance_level": "C+",
+            "parent_contact": "mia.parent@example.com",
+            "urgency": "before finals in May",
+            "prior_tutoring": "no",
+            "test_deadline": "May",
+            "schedule_windows": "evenings",
+            "decision_maker": "me",
+            "budget_signal": "around 200",
+        },
+    )
+    state = ConversationState(lead=lead)
+    agent.open(state)
+    # Give a positive signal so the pivot fires on the first turn after warmup.
+    action = agent.respond(state, "yes great, let's get started this week")
+    assert action.phase == Phase.PIVOT_TO_CLOSE
+    text = action.utterance.lower()
+    # Every collected field that the parent provided should show up in the recap.
+    assert "mia" in text
+    assert "8th" in text
+    assert "math and chemistry" in text
+    assert "c+" in text
+    assert "before finals in may" in text
+
+
 def test_competitive_question_is_grounded_in_battlecards() -> None:
     agent, state = _fresh()
     agent.open(state)

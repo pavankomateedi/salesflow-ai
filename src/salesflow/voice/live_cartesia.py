@@ -12,6 +12,7 @@ its contract (returns an ``AudioChunk`` whose ``pcm`` is 16-bit mono PCM at
 from __future__ import annotations
 
 import os
+from typing import Any
 
 from salesflow.voice.interfaces import AudioChunk
 
@@ -43,16 +44,20 @@ class CartesiaTTS:
         self.sample_rate = sample_rate
 
     def synthesize(self, text: str) -> AudioChunk:  # pragma: no cover - live only
+        # The SDK's output_format is a strict TypedDict union; the raw dict shape
+        # works at runtime but mypy can't disambiguate without an explicit cast.
+        output_format: Any = {
+            "container": "raw",
+            "encoding": "pcm_s16le",
+            "sample_rate": self.sample_rate,
+        }
+        voice: Any = {"mode": "id", "id": self.voice_id}
         chunks = self._client.tts.bytes(
             model_id=self.model,
             transcript=text,
-            voice={"mode": "id", "id": self.voice_id},
+            voice=voice,
             language="en",
-            output_format={
-                "container": "raw",
-                "encoding": "pcm_s16le",
-                "sample_rate": self.sample_rate,
-            },
+            output_format=output_format,
         )
         pcm = b"".join(chunks)
         # ~150 wpm => ~400ms/word is too slow; estimate ~60ms/word for metrics.

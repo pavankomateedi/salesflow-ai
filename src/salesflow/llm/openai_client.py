@@ -14,7 +14,7 @@ from typing import Any
 
 from salesflow.llm.base import LLMResponse, Message
 
-DEFAULT_MODEL = "gpt-4o"
+DEFAULT_MODEL = "gpt-4o-mini"  # voice loop needs sub-second turns; mini ~500ms
 
 
 class OpenAIClient:

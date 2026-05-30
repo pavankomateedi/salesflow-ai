@@ -18,6 +18,7 @@ class AudioChunk:
     duration_ms: int
     text: str = ""
     pcm: bytes = b""
+    sample_rate: int = 16000  # Hz; browser AudioContext is typically 48000.
 
 
 @dataclass

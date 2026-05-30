@@ -5,11 +5,14 @@ function: ``respond(state, prospect_text)`` analyses the utterance, updates
 signals, runs escalation -> disqualification -> objection -> phase logic in
 priority order, and returns a single :class:`AgentAction` with a full decision
 trace. Policy/pricing answers are grounded (KB + structured config); the LLM is
-only an optional phrasing layer.
+an optional phrasing layer that rewrites the planned line in context (kept
+*after* the deterministic decision, with hard constraints against inventing
+new facts).
 """
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 
 from salesflow import analysis
@@ -26,6 +29,8 @@ from salesflow.domain.models import (
     Turn,
 )
 from salesflow.knowledge.kb import KnowledgeBase, ObjectionType, classify_objection
+from salesflow.llm import MockLLMClient
+from salesflow.llm.base import LLMClient, Message
 
 _PRICING_INTENT = (
     "how much", "price", "pricing", "cost", "rate", "per hour", "per session", "plans",
@@ -86,11 +91,15 @@ class SalesAgent:
         settings: Settings = SETTINGS,
         playbook: Playbook | None = None,
         version: str = "alex-v1.0.0",
+        llm: LLMClient | None = None,
     ) -> None:
         self.kb = kb or KnowledgeBase()
         self.settings = settings
         self.playbook = playbook or Playbook()
         self.version = version
+        # Tests + CI use mock (deterministic). The web/voice surfaces opt into the
+        # live backend by passing ``llm=get_client()``.
+        self.llm: LLMClient = llm or MockLLMClient()
 
     # -- public API ---------------------------------------------------------
 
@@ -267,11 +276,7 @@ class SalesAgent:
         if state.phase == Phase.PIVOT_TO_CLOSE:
             state.probe_attempts += 1
         state.phase = Phase.PIVOT_TO_CLOSE
-        name = state.lead.all_fields.get("student_name", "your student")
-        summary = (
-            f"So to recap: tutoring for {name}, month-to-month with a refundable first session "
-            "and a matched tutor within 48 hours. Shall we get the first session scheduled?"
-        )
+        summary = self._build_recap(state)
         utterance = f"{prefix} {summary}".strip() if prefix else summary
         action = AgentAction(
             utterance=utterance,
@@ -337,7 +342,83 @@ class SalesAgent:
         self._record(state, action)
         return action
 
+    def _build_recap(self, state: ConversationState) -> str:
+        """Build the pivot recap using every field actually collected.
+
+        Earlier versions hardcoded ``student_name`` and dropped subjects, grade,
+        urgency etc., so prospects saw a vague summary. This pulls everything
+        the agent gathered so the recap actually reflects the conversation.
+        """
+        f = state.lead.all_fields
+        name = f.get("student_name") or "your student"
+        parts: list[str] = [f"tutoring for {name}"]
+        if f.get("grade_level"):
+            parts.append(f"in {f['grade_level']}")
+        if f.get("subjects"):
+            parts.append(f"focused on {f['subjects']}")
+        if f.get("performance_level"):
+            parts.append(f"currently at {f['performance_level']}")
+        if f.get("urgency"):
+            parts.append(f"timeline: {f['urgency']}")
+        recap = ", ".join(parts)
+        return (
+            f"So to recap — {recap}. We'd start month-to-month with a refundable "
+            "first session and a matched tutor within 48 hours. "
+            "Shall we get the first session scheduled?"
+        )
+
+    def _naturalize(
+        self, base: str, state: ConversationState, asked_field: str | None
+    ) -> str:
+        """Rewrite a planned line conversationally, in Alex's voice.
+
+        Constraints kept hard so the LLM cannot drift off grounded facts:
+          * Any ``$NN`` figure in the planned line must remain in the rewrite
+            verbatim (we revert otherwise).
+          * The mock backend is a no-op so the test suite stays deterministic.
+        """
+        if self.llm.name == "mock":
+            return base
+        last_prospect = state.prospect_turns[-1].text if state.prospect_turns else ""
+        if not last_prospect:  # opening greeting has no context yet
+            return base
+        try:
+            system = (
+                "You are Alex, a warm and professional tutoring sales rep at Nerdy. "
+                "Rewrite the agent's planned next line so it sounds natural and "
+                "conversational, briefly acknowledging what the parent just said when "
+                "relevant. One or two sentences max, calm and human. "
+                "CRITICAL: Keep ALL dollar figures, percentages, and specific policy "
+                "facts EXACTLY as written. Do NOT invent any pricing, guarantees, or "
+                "facts not in the planned line. If the planned line ends with a "
+                "question, the rewrite must end with the same question."
+            )
+            user = (
+                f"Parent just said: {last_prospect!r}\n"
+                f"Planned agent line: {base!r}\n"
+                f"Asking about next: {asked_field or 'n/a'}\n\n"
+                "Your rewrite (one or two sentences):"
+            )
+            resp = self.llm.complete(
+                system=system,
+                messages=[Message(role="user", content=user)],
+                max_tokens=180,
+                temperature=0.4,
+            )
+            rewritten = resp.text.strip().strip('"').strip("'")
+            # Defensive grounding check: any $NN in the planned line MUST appear
+            # verbatim in the rewrite. If the LLM dropped or changed a figure,
+            # revert to the deterministic line.
+            for dollar in re.findall(r"\$\d+(?:\.\d+)?", base):
+                if dollar not in rewritten:
+                    return base
+            return rewritten or base
+        except Exception:
+            # An LLM hiccup must never break the call; fall back to the planned line.
+            return base
+
     def _record(self, state: ConversationState, action: AgentAction) -> None:
+        action.utterance = self._naturalize(action.utterance, state, action.asked_field)
         state.add_turn(
             Turn(
                 speaker="agent",
