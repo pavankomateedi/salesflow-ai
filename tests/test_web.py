@@ -136,6 +136,24 @@ def test_ws_voice_escalation_emits_ended(client: TestClient) -> None:
         assert ended["outcome"] == "escalated"
 
 
+def test_ws_voice_abandoned_call_is_still_recorded(client: TestClient) -> None:
+    """User report: dashboard showed 1 live call after 3 completed. Calls that
+    end via the client closing the websocket (End call / New call before reaching
+    a terminal phase) must still be captured so the user sees their real activity.
+    """
+    from salesflow import web as web_module
+
+    before = len(web_module._LIVE_CALLS)
+    with client.websocket_connect("/ws/voice") as ws:
+        ws.receive_json()  # opening
+        ws.send_json({"type": "utterance", "text": "Hi."})
+        ws.receive_json()  # reply (call is mid-conversation, not terminal)
+        # Client disconnects without going through to close.
+    assert len(web_module._LIVE_CALLS) == before + 1, "abandoned call must be recorded"
+    captured = web_module._LIVE_CALLS[-1]
+    assert captured.turns, "abandoned call must carry its transcript"
+
+
 def test_ws_voice_barge_is_acked(client: TestClient) -> None:
     with client.websocket_connect("/ws/voice") as ws:
         ws.receive_json()  # opening

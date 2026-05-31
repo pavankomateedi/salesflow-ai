@@ -49,9 +49,18 @@ _LIVE_CALLS: list[CallLog] = []
 _RECORDED: set[str] = set()
 
 
-def _record_if_terminal(session_id: str, state: ConversationState) -> None:
-    """Snapshot the call into the live-stats store once it reaches a terminal state."""
-    if not state.phase.is_terminal or session_id in _RECORDED:
+def _record_call(session_id: str, state: ConversationState) -> None:
+    """Snapshot the call into the live-stats store. Idempotent via ``_RECORDED``.
+
+    Called from BOTH the natural terminal-phase path (CLOSE / ESCALATION /
+    GRACEFUL_EXIT) and the websocket-close path (abandoned mid-call). The
+    abandoned case keeps ``state.outcome == IN_PROGRESS`` and the final phase
+    wherever the parent stopped, so the dashboard reflects every conversation
+    the user actually had — not just the ones that ran to completion.
+    """
+    if session_id in _RECORDED:
+        return
+    if not state.turns:  # nothing happened — nothing worth recording
         return
     _LIVE_CALLS.append(
         CallLog(
@@ -127,7 +136,8 @@ def chat(req: ChatRequest) -> JSONResponse:
             {"error": "this call has ended — start a new one", "terminal": True}, status_code=409
         )
     action = _agent.respond(state, req.message)
-    _record_if_terminal(req.session_id, state)
+    if state.phase.is_terminal:
+        _record_call(req.session_id, state)
     return JSONResponse(_payload(state, action))
 
 
@@ -247,11 +257,16 @@ async def ws_voice(ws: WebSocket) -> None:
             await ws.send_json({"type": "reply", "transcript": text, **_payload(state, action)})
             await _send_audio(ws, action.utterance)
             if state.phase.is_terminal:
-                _record_if_terminal(session_id, state)
+                _record_call(session_id, state)
                 await ws.send_json({"type": "ended", "outcome": state.outcome.value})
                 break
     except WebSocketDisconnect:
         pass
+    finally:
+        # Even if the user clicked "End call" / "New call" before reaching a
+        # terminal phase, the conversation still happened — capture it so the
+        # dashboard reflects every call, not just the ones that ran to close.
+        _record_call(session_id, state)
 
 
 # --- React SPA (with vanilla fallback when unbuilt) ------------------------
