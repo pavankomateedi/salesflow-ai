@@ -69,6 +69,76 @@ def test_ab_playbook_override_swaps_rebuttal_text() -> None:
     assert "variant" in action.grounded_sources
 
 
+def test_qualification_probe_does_not_loop_on_positive_reply() -> None:
+    """User complaint: after answering 'Yes.' to a qualify probe, the agent
+    repeated the same probe instead of pivoting. Force pivot on positive reply
+    so the parent isn't asked the same question twice.
+
+    Setup: all fields known but an unresolved open objection keeps
+    ``pivot_ready`` False, so the probe path is exercised. Two consecutive
+    positive replies must result in: probe (1st) then pivot (2nd), not two
+    identical probes.
+    """
+    agent = SalesAgent()
+    lead = Lead(
+        phone="+15550006666",
+        known={
+            "student_name": "Mia",
+            "grade_level": "8th",
+            "subjects": "math",
+            "performance_level": "C",
+            "parent_contact": "mia@example.com",
+            "urgency": "soon",
+            "prior_tutoring": "no",
+            "test_deadline": "May",
+            "schedule_windows": "evenings",
+            "decision_maker": "me",
+            "budget_signal": "200",
+        },
+    )
+    state = ConversationState(lead=lead)
+    # Simulate an unresolved objection so pivot_ready stays False.
+    state.open_objections = ["price"]
+    agent.open(state)
+    first = agent.respond(state, "Yes.")
+    assert first.phase == Phase.QUALIFICATION
+    assert first.decision.get("step") == "qualify_probe"
+    # Second positive reply must NOT be the same probe; must pivot.
+    second = agent.respond(state, "Yes, it does.")
+    assert second.phase == Phase.PIVOT_TO_CLOSE
+    assert "So to recap" in second.utterance
+
+
+def test_qualification_probes_vary_on_repeat() -> None:
+    """Even when forced to probe twice (e.g., neutral replies), the second
+    probe must differ from the first so it doesn't read as a broken record."""
+    agent = SalesAgent()
+    lead = Lead(
+        phone="+15550007777",
+        known={
+            "student_name": "Sam",
+            "grade_level": "7th",
+            "subjects": "science",
+            "performance_level": "B",
+            "parent_contact": "sam@example.com",
+            "urgency": "soon",
+            "prior_tutoring": "no",
+            "test_deadline": "May",
+            "schedule_windows": "evenings",
+            "decision_maker": "me",
+            "budget_signal": "200",
+        },
+    )
+    state = ConversationState(lead=lead)
+    state.open_objections = ["price"]  # keep pivot_ready False
+    agent.open(state)
+    # Neutral reply -> first probe.
+    first = agent.respond(state, "I'm thinking about it.")
+    # Another neutral reply -> second probe, must differ in text.
+    second = agent.respond(state, "Let me think more.")
+    assert first.utterance != second.utterance
+
+
 def test_recap_is_not_re_appended_on_follow_up_questions() -> None:
     """User complaint: once in PIVOT_TO_CLOSE the agent re-appended the full
     recap to every grounded reply. After the first recap, follow-up questions

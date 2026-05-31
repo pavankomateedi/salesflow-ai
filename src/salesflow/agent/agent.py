@@ -281,19 +281,38 @@ class SalesAgent:
         if pivot.ready or state.phase == Phase.PIVOT_TO_CLOSE:
             return self._pivot_or_close(state, pivot_signals=pivot.as_dict(), prefix=prefix)
 
-        # Not ready: do a soft fit-confirmation probe to elicit a signal.
+        # If we've already probed once and the parent just gave a positive reply
+        # ("Yes.", "Yes, it does.", "sounds good"), commit to the pivot instead
+        # of looping the same probe. The strict pivot_ready check can fail when
+        # a leading field has a soft value (e.g., the LLM extracted "yes" rather
+        # than "soon"), but the parent's intent is unmistakable.
+        last_prospect = state.prospect_turns[-1].text if state.prospect_turns else ""
+        positive_reply = (
+            analysis.score_sentiment(last_prospect) == Sentiment.POSITIVE
+            or analysis.is_positive_intent(last_prospect)
+        )
+        if state.phase == Phase.QUALIFICATION and state.probe_attempts > 0 and positive_reply:
+            return self._pivot_or_close(state, pivot_signals=pivot.as_dict(), prefix=prefix)
+
+        # Not ready: vary the soft fit-confirmation probe by attempt so it
+        # doesn't read as a broken-record loop.
         state.phase = Phase.QUALIFICATION
         state.probe_attempts += 1
-        probe = (
+        probes = (
             "Based on what you've shared, this sounds like a strong fit. "
-            "Does getting started this week sound good to you?"
+            "Does getting started this week sound good to you?",
+            "Just to make sure I'm not missing anything — is there anything else "
+            "you'd want to know before we schedule the first session?",
+            "Would picking a time later this week be easier, or earlier in the next?",
         )
+        probe = probes[min(state.probe_attempts - 1, len(probes) - 1)]
         utterance = f"{prefix} {probe}".strip() if prefix else probe
         action = AgentAction(
             utterance=utterance,
             phase=Phase.QUALIFICATION,
             grounded_sources=sources,
-            decision={"step": "qualify_probe", "pivot": pivot.as_dict()},
+            decision={"step": "qualify_probe", "attempt": state.probe_attempts,
+                      "pivot": pivot.as_dict()},
         )
         self._record(state, action)
         return action
