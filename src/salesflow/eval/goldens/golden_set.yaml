@@ -145,6 +145,30 @@ pivot:
     disqualify_signals: 1
     expected_ready: false
 
+# --- Close affirmation: tight check that "Yes." closes but polite let-downs don't ---
+# Added after a regression where broad positive-sentiment caused the A/B
+# simulation's "I'll think about it, thanks." (polite rejection containing the
+# positive word "thanks") to falsely close the call. Each case is exact-match
+# asserted against analysis.is_close_affirmation.
+close_affirmation:
+  # True positives — these MUST close the call after a pivot recap:
+  - {text: "Yes.", expected: true}
+  - {text: "Yes, it does.", expected: true}
+  - {text: "Sure.", expected: true}
+  - {text: "Sure thing.", expected: true}
+  - {text: "Yeah, sounds great.", expected: true}
+  - {text: "Okay yeah let's do it", expected: true}
+  - {text: "Absolutely.", expected: true}
+  - {text: "Definitely.", expected: true}
+  # True negatives — polite let-downs that contain positive words but mean "no":
+  - {text: "I'll think about it, thanks.", expected: false}
+  - {text: "Maybe later.", expected: false}
+  - {text: "Yeah, no thanks.", expected: false}
+  - {text: "Thanks, but no.", expected: false}
+  - {text: "Not right now.", expected: false}
+  - {text: "Great, but I need to think more.", expected: false}
+  - {text: "Sounds good but maybe in a few months.", expected: false}
+
 # --- End-to-end self-play outcomes per adversarial persona ---
 self_play:
   - persona: ReadyRita

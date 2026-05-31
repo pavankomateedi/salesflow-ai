@@ -5,9 +5,9 @@ on:
   pull_request:
 
 jobs:
-  quality-gates:
+  python-gates:
+    name: Python (ruff + mypy + pytest + eval smoke)
     runs-on: ubuntu-latest
-    # Runs from this directory (the salesflow project root).
     defaults:
       run:
         working-directory: ${{ github.workspace }}
@@ -34,7 +34,28 @@ jobs:
         env:
           PYTHONPATH: src
 
-      - name: Eval harness smoke (self-play + A/B)
+      - name: Eval harness smoke (golden set + self-play + A/B)
         run: python -m salesflow.eval.cli all --n 100
         env:
           PYTHONPATH: src
+
+  # Catches JSX/SPA syntax errors before the Render multi-stage Docker build
+  # would fail in production. Mirrors the frontend stage of the Dockerfile.
+  frontend-build:
+    name: React SPA build
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: ${{ github.workspace }}/frontend
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Install frontend deps
+        run: npm ci || npm install
+
+      - name: Build SPA (vite)
+        run: npm run build

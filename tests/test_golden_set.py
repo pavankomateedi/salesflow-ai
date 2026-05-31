@@ -12,6 +12,7 @@ import salesflow.personas as personas
 from salesflow.agent.escalation import classify_escalation
 from salesflow.agent.pivot import pivot_ready
 from salesflow.agent.question_selector import next_field
+from salesflow.analysis import is_close_affirmation
 from salesflow.config import SETTINGS
 from salesflow.domain.models import REQUIRED_FIELDS, ConversationState, Lead, Outcome, Phase
 from salesflow.domain.phases import can_transition
@@ -76,6 +77,17 @@ def test_pivot(case: dict) -> None:
     state.open_objections = list(case["open_objections"])
     state.disqualify_signals = case["disqualify_signals"]
     assert pivot_ready(state, SETTINGS).ready is case["expected_ready"], case["description"]
+
+
+@pytest.mark.parametrize("case", GOLDEN["close_affirmation"])
+def test_close_affirmation(case: dict) -> None:
+    """Tight close detection: bare 'Yes.' closes, polite let-downs don't.
+
+    Encodes the regression that broke the A/B simulation when a broad
+    positive-sentiment check falsely closed calls on 'I'll think about it,
+    thanks.' Each row is exact-match against ``is_close_affirmation``.
+    """
+    assert is_close_affirmation(case["text"]) is case["expected"], case["text"]
 
 
 @pytest.mark.parametrize("case", GOLDEN["self_play"])

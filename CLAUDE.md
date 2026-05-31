@@ -87,6 +87,33 @@ React build succeeds.
   (Silent Sam) escalates as disqualification-uncertainty instead of looping to the
   turn cap.
 - Voice latency stages sum to 750ms (50+150+400+100+50) ≤ 800ms budget.
+- **Recap fires once.** After first entry to `PIVOT_TO_CLOSE`, follow-up grounded
+  questions get the grounded answer + short close ("Shall we get the first session
+  scheduled?"), NEVER the full recap re-appended. Enforced by
+  `test_recap_is_not_re_appended_on_follow_up_questions`.
+- **Qualification probes vary and don't loop.** After the first probe, a positive
+  reply forces the pivot; consecutive neutral replies get different probe texts.
+  Enforced by `test_qualification_probe_does_not_loop_on_positive_reply` and
+  `test_qualification_probes_vary_on_repeat`.
+- **Close fires on tight affirmation.** `is_close_affirmation` accepts bare
+  "Yes." / "Sure." / "Okay yeah" but explicitly rejects "I'll think about it,
+  thanks." / "Yeah, no thanks." — the broad-sentiment version broke the A/B
+  simulation. Encoded in `golden_set.yaml::close_affirmation`.
+- **LLM phrasing has hard grounding guardrails.** `_naturalize` and `_build_recap`
+  both revert to the deterministic line if a `$NN` figure is dropped or a closing
+  question removed; mock backend is a no-op so tests stay deterministic.
+- **Recap pulls every collected field**, not just `student_name`. Enforced by
+  `test_pivot_recap_includes_every_collected_field`.
+
+## Configurable voice (env vars, no rebuild needed)
+
+- `CARTESIA_API_KEY` — turns on live STT+TTS.
+- `CARTESIA_VOICE_ID` — pick any voice from https://play.cartesia.ai/voices.
+- `CARTESIA_VOICE_SPEED` — `slow` / `normal` / `fast` (default `fast`).
+- `SALESFLOW_STT` — `cartesia` / `groq` / `local` / `mock` (default `mock`; must
+  be `cartesia` in prod for the websocket to use Ink-Whisper).
+- `OPENAI_API_KEY` — turns on `natural_phrasing`, `smart_extraction`,
+  `llm_recap_review`. Check `/api/status` to confirm.
 
 ## Voice / STT note
 
