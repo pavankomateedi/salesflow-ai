@@ -17,8 +17,11 @@ from typing import Any
 from salesflow.voice.interfaces import AudioChunk
 
 DEFAULT_MODEL = "sonic-2"
-# A neutral default Cartesia voice; override with CARTESIA_VOICE_ID.
-DEFAULT_VOICE_ID = "a0e99841-438c-4a64-b679-ae501e7d6091"
+# Default voice: "Sophie" — Cartesia's warm female American English voice, so
+# Vani (a female persona) sounds female by default. Override per-deployment with
+# the ``CARTESIA_VOICE_ID`` env var; browse alternatives at
+# https://play.cartesia.ai/voices (copy the voice id from any voice card).
+DEFAULT_VOICE_ID = "f9836c6e-a0bd-460e-9d3c-f7299fa60f94"
 DEFAULT_SAMPLE_RATE = 16000
 
 
