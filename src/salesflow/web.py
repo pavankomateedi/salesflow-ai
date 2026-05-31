@@ -21,6 +21,7 @@ import asyncio
 import base64
 import os
 import uuid
+from functools import lru_cache
 from pathlib import Path
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
@@ -31,8 +32,10 @@ from pydantic import BaseModel
 from salesflow import AGENT_VERSION
 from salesflow.agent.agent import AgentAction, SalesAgent
 from salesflow.domain.models import CallLog, ConversationState, Lead
-from salesflow.eval.dashboard import build_dashboard
+from salesflow.eval.dashboard import live_block, synthetic_block
+from salesflow.eval.judge import GroundingJudge
 from salesflow.llm import get_client
+from salesflow.observability import save_transcript
 from salesflow.voice.factory import get_stt, get_tts, voice_available
 from salesflow.voice.interfaces import AudioChunk
 
@@ -47,35 +50,47 @@ _SESSIONS: dict[str, ConversationState] = {}
 # the dashboard alongside the synthetic baseline.
 _LIVE_CALLS: list[CallLog] = []
 _RECORDED: set[str] = set()
+# PII-redacted transcripts persist under this directory; survives process
+# restart (Render redeploy) so the dashboard can be wired to disk later.
+_TRANSCRIPT_DIR = Path(os.environ.get("SALESFLOW_TRANSCRIPTS_DIR", "/tmp/salesflow-transcripts"))
 
 
 def _record_call(session_id: str, state: ConversationState) -> None:
     """Snapshot the call into the live-stats store. Idempotent via ``_RECORDED``.
 
-    Called from BOTH the natural terminal-phase path (CLOSE / ESCALATION /
-    GRACEFUL_EXIT) and the websocket-close path (abandoned mid-call). The
-    abandoned case keeps ``state.outcome == IN_PROGRESS`` and the final phase
-    wherever the parent stopped, so the dashboard reflects every conversation
-    the user actually had — not just the ones that ran to completion.
+    Skips ``state.turns`` containing only the agent's opening greeting (no
+    prospect input yet) — those are drive-by page visits, not conversations,
+    and they were polluting the dashboard's call count after the
+    ``finally``-block recording was added.
+
+    Persists a PII-redacted transcript to ``_TRANSCRIPT_DIR`` so the call
+    survives an instance restart and operators can audit later.
     """
     if session_id in _RECORDED:
         return
-    if not state.turns:  # nothing happened — nothing worth recording
+    if not state.turns:  # websocket opened then immediately closed
         return
-    _LIVE_CALLS.append(
-        CallLog(
-            session_id=session_id,
-            phone=state.lead.phone,
-            agent_version=AGENT_VERSION,
-            turns=list(state.turns),
-            outcome=state.outcome,
-            final_phase=state.phase,
-            escalation_trigger=state.escalation_trigger,
-            collected_fields=dict(state.lead.all_fields),
-            decisions=[t.decision for t in state.turns if t.speaker == "agent" and t.decision],
-        )
+    # Require at least one prospect turn — opener alone is a drive-by visit.
+    if not any(t.speaker == "prospect" for t in state.turns):
+        return
+    log = CallLog(
+        session_id=session_id,
+        phone=state.lead.phone,
+        agent_version=AGENT_VERSION,
+        turns=list(state.turns),
+        outcome=state.outcome,
+        final_phase=state.phase,
+        escalation_trigger=state.escalation_trigger,
+        collected_fields=dict(state.lead.all_fields),
+        decisions=[t.decision for t in state.turns if t.speaker == "agent" and t.decision],
     )
+    _LIVE_CALLS.append(log)
     _RECORDED.add(session_id)
+    # Best-effort disk persistence — never let a transcript-store hiccup break
+    # the live call loop.
+    import contextlib
+    with contextlib.suppress(Exception):
+        save_transcript(log, _TRANSCRIPT_DIR)
 
 _DEFAULT_DIST = Path(__file__).resolve().parents[2] / "frontend" / "dist"
 _FRONTEND_DIST = Path(os.environ.get("SALESFLOW_FRONTEND_DIST", str(_DEFAULT_DIST)))
@@ -141,13 +156,31 @@ def chat(req: ChatRequest) -> JSONResponse:
     return JSONResponse(_payload(state, action))
 
 
+@lru_cache(maxsize=8)
+def _cached_synthetic(n_ab: int) -> dict[str, object]:
+    """Memoise the heavy synthetic + A/B + grounding-judge work by ``n_ab``.
+
+    The synthetic baseline is deterministic given (n_ab, seed=7) so it can be
+    cached aggressively. Without this, Dashboard.jsx's 8s auto-refresh pinned
+    a full core per open tab.
+    """
+    return synthetic_block(n_ab=n_ab)
+
+
 @app.get("/api/kpis")
 def api_kpis(n_ab: int = 200) -> JSONResponse:
-    """Dynamic dashboard data: live calls + synthetic baseline. Not cached so
-    each request reflects the most recent terminated calls on this server."""
-    return JSONResponse(
-        build_dashboard(n_ab=max(20, min(2000, n_ab)), live_calls=list(_LIVE_CALLS))
+    """Dynamic dashboard data: synthetic block (cached by n_ab) + live block
+    (always fresh from this process's recorded calls).
+    """
+    n = max(20, min(2000, n_ab))
+    live = list(_LIVE_CALLS)
+    synth = _cached_synthetic(n)
+    payload = dict(synth)
+    payload.update(live_block(live))
+    payload["hallucination_rate"] = GroundingJudge().hallucination_rate(live) if live else (
+        synth.get("synthetic_hallucination_rate", 0.0)
     )
+    return JSONResponse(payload)
 
 
 @app.get("/api/voice/status")

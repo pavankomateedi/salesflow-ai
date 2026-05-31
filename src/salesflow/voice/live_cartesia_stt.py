@@ -59,12 +59,16 @@ class CartesiaSTT:
 
         # SDK 3.x exposes the file via the ``file=`` kwarg. The accepted shape is
         # either a multipart tuple or a BinaryIO; try the tuple first (most
-        # SDK versions accept it), fall back to BytesIO. cast(Any) keeps mypy
-        # honest about the strict typing while letting both runtime shapes work.
+        # SDK versions accept it), fall back to BytesIO.
         attempts: tuple[Any, ...] = (
             ("audio.wav", wav_bytes, "audio/wav"),
             io.BytesIO(wav_bytes),
         )
+        # Catch the broader Exception family so a Pydantic ValidationError,
+        # AttributeError, or SDK-specific exception on the FIRST shape still
+        # falls through to the BytesIO retry. Auth/network errors will also
+        # land here, but the second attempt will surface the same exception
+        # so the final RuntimeError preserves the original via ``from``.
         last_exc: Exception | None = None
         for file_arg in attempts:
             try:
@@ -75,10 +79,11 @@ class CartesiaSTT:
                 )
                 text = getattr(result, "text", "") or ""
                 return Transcript(text=text.strip(), confidence=1.0, is_final=True)
-            except TypeError as exc:
+            except Exception as exc:
                 last_exc = exc
                 continue
+        # Re-raise with chain preserved so operators see the actual Cartesia
+        # exception (auth/rate-limit/etc.), not a misleading "signature mismatch".
         raise RuntimeError(
-            f"Cartesia STT file= signature mismatch: {last_exc!r}. "
-            "Run `inspect.signature(client.stt.transcribe)` to find the right shape."
-        )
+            "Cartesia STT failed on all known file= shapes; see chained exception"
+        ) from last_exc

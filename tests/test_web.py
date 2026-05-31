@@ -93,10 +93,10 @@ def test_chat_after_terminal_is_409(client: TestClient) -> None:
 def test_api_kpis_shape(client: TestClient) -> None:
     d = client.get("/api/kpis?n_ab=40").json()
     assert d["agent_version"]
-    assert d["kpis"] and isinstance(d["kpis"], dict)
+    assert d["synthetic"]["kpis"] and isinstance(d["synthetic"]["kpis"], dict)
     assert d["hallucination_rate"] == 0.0  # grounded by construction
     assert d["ab"]["best"]
-    assert d["sample_transcript"]["redacted"] is True
+    assert d["synthetic"]["sample_transcript"]["redacted"] is True
 
 
 def test_voice_status_reports_backend(client: TestClient) -> None:

@@ -22,10 +22,16 @@ export default function Voice() {
   const [callStarted, setCallStarted] = useState(false);
   const [ended, setEnded] = useState(false);
   const [input, setInput] = useState("");
-  const [micLevel, setMicLevel] = useState(0); // 0..1 for the live meter
+  const [micLevel, setMicLevel] = useState(0); // 0..1 for the live meter (rAF-throttled)
 
   const wsRef = useRef(null);
   const ctxRef = useRef(null);
+  // Refs that mirror state for the ScriptProcessor onaudioprocess closure —
+  // React state via closure is stale because the audio callback is bound once
+  // at startMic and never re-rendered. agentSpeakingRef fixes barge-in.
+  const agentSpeakingRef = useRef(false);
+  const micLevelRef = useRef(0);
+  const levelRafRef = useRef(null);
   const srcRef = useRef(null); // current playing source (for barge-in)
   const micRef = useRef(null); // { stream, processor }
   const logRef = useRef(null);
@@ -44,7 +50,7 @@ export default function Voice() {
       try { srcRef.current.stop(); } catch { /* already stopped */ }
       srcRef.current = null;
     }
-    setAgentSpeaking(false);
+    (agentSpeakingRef.current = false, setAgentSpeaking(false));
   }
 
   function playPcm(b64, sampleRate) {
@@ -55,9 +61,10 @@ export default function Voice() {
     source.buffer = buffer;
     source.connect(c.destination);
     source.onended = () => {
-      if (srcRef.current === source) { srcRef.current = null; setAgentSpeaking(false); }
+      if (srcRef.current === source) { srcRef.current = null; (agentSpeakingRef.current = false, setAgentSpeaking(false)); }
     };
     srcRef.current = source;
+    agentSpeakingRef.current = true;
     setAgentSpeaking(true);
     source.start();
   }
@@ -69,7 +76,13 @@ export default function Voice() {
     ws.onopen = () => setConnected(true);
     ws.onclose = () => { setConnected(false); setListening(false); };
     ws.onmessage = (ev) => {
-      const d = JSON.parse(ev.data);
+      let d;
+      try {
+        d = JSON.parse(ev.data);
+      } catch (e) {
+        append("sys", `dropped malformed server frame: ${e.message}`);
+        return;
+      }
       if (d.type === "reply") {
         if (d.transcript) append("you", d.transcript);
         append("agent", d.reply, decisionLine(d));
@@ -118,14 +131,29 @@ export default function Voice() {
     let speaking = false;
     let lastVoice = 0;
 
+    // Pump the smoothed level into a ref every audio block, then flush to React
+    // state once per animation frame so the meter looks continuous but Voice.jsx
+    // doesn't re-render 11×/sec. The whole tree (transcript + status pills) was
+    // re-rendering on every audio block before this.
+    if (levelRafRef.current == null) {
+      const flush = () => {
+        setMicLevel(micLevelRef.current);
+        levelRafRef.current = requestAnimationFrame(flush);
+      };
+      levelRafRef.current = requestAnimationFrame(flush);
+    }
+
     processor.onaudioprocess = (e) => {
       const frame = e.inputBuffer.getChannelData(0);
       const level = rms(frame);
-      // Smooth the displayed level a bit so the meter doesn't jitter wildly.
-      setMicLevel((prev) => prev * 0.6 + Math.min(1, level * 8) * 0.4);
+      // Smooth the displayed level so the meter doesn't jitter wildly.
+      micLevelRef.current = micLevelRef.current * 0.6 + Math.min(1, level * 8) * 0.4;
       const now = performance.now();
       if (level > SPEAK_THRESHOLD) {
-        if (agentSpeaking) {
+        // Read agentSpeaking via REF, not closure — the ScriptProcessor callback
+        // is bound once and would otherwise see the stale initial `false` value,
+        // breaking barge-in for the whole call.
+        if (agentSpeakingRef.current) {
           wsRef.current?.send(JSON.stringify({ type: "barge" }));
           stopPlayback();
         }
@@ -162,6 +190,11 @@ export default function Voice() {
     try { m.processor.disconnect(); m.sourceNode.disconnect(); } catch { /* noop */ }
     m.stream.getTracks().forEach((t) => t.stop());
     micRef.current = null;
+    if (levelRafRef.current != null) {
+      cancelAnimationFrame(levelRafRef.current);
+      levelRafRef.current = null;
+    }
+    micLevelRef.current = 0;
     setListening(false);
     setMicLevel(0);
   }

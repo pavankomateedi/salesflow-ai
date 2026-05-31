@@ -203,6 +203,16 @@ class SalesAgent:
             value = resp.text.strip().strip('"').strip("'").rstrip(".").strip()
             if not value or value.upper() == "NO_ANSWER":
                 return None
+            # Grounding check: the LLM must extract a value that actually appears
+            # in (or is recognisably derived from) the parent's reply. Otherwise
+            # it's a hallucination and we fall back to the deterministic extractor
+            # so collected_fields stays grounded in what was actually said. We
+            # compare on lowercased token overlap so minor normalisation
+            # ("8th grade" from "eighth grade") survives.
+            value_tokens = set(re.findall(r"[a-z0-9]+", value.lower()))
+            text_tokens = set(re.findall(r"[a-z0-9]+", text.lower()))
+            if value_tokens and not (value_tokens & text_tokens):
+                return analysis.extracts_field(field, text)
             return value
         except Exception:
             return analysis.extracts_field(field, text)
@@ -287,9 +297,13 @@ class SalesAgent:
         # a leading field has a soft value (e.g., the LLM extracted "yes" rather
         # than "soon"), but the parent's intent is unmistakable.
         last_prospect = state.prospect_turns[-1].text if state.prospect_turns else ""
+        # Use the TIGHT close-affirmation check, NOT raw positive sentiment —
+        # "really love it but the cost is too high" reads as POSITIVE sentiment
+        # but is a price objection. The same broad check broke A/B in an
+        # earlier round; do not bring it back.
         positive_reply = (
-            analysis.score_sentiment(last_prospect) == Sentiment.POSITIVE
-            or analysis.is_positive_intent(last_prospect)
+            analysis.is_positive_intent(last_prospect)
+            or analysis.is_close_affirmation(last_prospect)
         )
         if state.phase == Phase.QUALIFICATION and state.probe_attempts > 0 and positive_reply:
             return self._pivot_or_close(state, pivot_signals=pivot.as_dict(), prefix=prefix)
@@ -366,9 +380,13 @@ class SalesAgent:
 
         # Re-pivot path: prospect engaged with a follow-up after the recap.
         # If they asked a grounded question (prefix is set), surface the answer
-        # plus a short close. Only count as a probe when the turn was empty of
-        # productive content, so escalation still fires for true non-committers.
+        # plus a short close. ALSO increment probe_attempts — repeatedly asking
+        # follow-ups without committing IS unproductive activity and the Silent
+        # Sam invariant requires it to escalate as disqualification-uncertainty
+        # eventually. Previously this path skipped the increment and the loop
+        # ran to MAX_TURNS.
         if prefix:
+            state.probe_attempts += 1
             utterance = f"{prefix} {short_close}".strip()
             action = AgentAction(
                 utterance=utterance,
@@ -493,7 +511,8 @@ class SalesAgent:
             text = resp.text.strip().strip('"').strip("'")
             # Guardrails: must end with a closing question; recap must not invent
             # dollar figures (pricing is handled separately, never in the recap).
-            if "?" not in text or re.search(r"\$\d+", text):
+            # `[\d,]+` matches both plain and comma-grouped figures.
+            if "?" not in text or re.search(r"\$[\d,]+", text):
                 return template
             return text or template
         except Exception:
@@ -557,10 +576,11 @@ class SalesAgent:
                 temperature=0.4,
             )
             rewritten = resp.text.strip().strip('"').strip("'")
-            # Defensive grounding check: any $NN in the planned line MUST appear
-            # verbatim in the rewrite. If the LLM dropped or changed a figure,
-            # revert to the deterministic line.
-            for dollar in re.findall(r"\$\d+(?:\.\d+)?", base):
+            # Defensive grounding check: any $-figure in the planned line MUST
+            # appear verbatim in the rewrite. Pattern matches plain ($90), decimal
+            # ($90.00), and comma-grouped ($1,200) figures so the guard still
+            # holds when a Pricing tier exceeds $999.
+            for dollar in re.findall(r"\$[\d,]+(?:\.\d+)?", base):
                 if dollar not in rewritten:
                     return base
             return rewritten or base
@@ -569,7 +589,12 @@ class SalesAgent:
             return base
 
     def _record(self, state: ConversationState, action: AgentAction) -> None:
-        action.utterance = self._naturalize(action.utterance, state, action.asked_field)
+        # Skip naturalize on the pivot recap turn — _build_recap already ran the
+        # LLM review pass on it, and a second pass against a different (shorter)
+        # prompt can drop the closing question or paraphrase facts away. The
+        # close turn (step="close") has hardcoded English that is fine to rephrase.
+        if action.decision.get("step") != "pivot":
+            action.utterance = self._naturalize(action.utterance, state, action.asked_field)
         state.add_turn(
             Turn(
                 speaker="agent",

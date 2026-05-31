@@ -98,7 +98,12 @@ _AFFIRM_STARTS: tuple[str, ...] = (
     "absolutely", "definitely", "of course",
 )
 _REJECTION_TOKENS: frozenset[str] = frozenset(
-    "think later maybe not won't wouldn't can't couldn't no nah pass".split()
+    # Hedges and conditional words: a yes that contains any of these is NOT
+    # an unconditional commitment ("Yes, but I need a discount first.",
+    # "Sure, if you can match Wyzant.", "Okay unless the price is firm.").
+    "think later maybe not won't wouldn't can't couldn't no nah pass "
+    "but if unless except only assuming provided depends conditional "
+    "discount cheaper".split()
 )
 
 

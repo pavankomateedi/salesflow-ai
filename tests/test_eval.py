@@ -82,6 +82,7 @@ def test_dashboard_data_assembles() -> None:
 
     d = build_dashboard(n_ab=40)
     assert d["agent_version"]
-    assert isinstance(d["kpis"], dict) and d["kpis"]
+    synth = d["synthetic"]
+    assert isinstance(synth, dict) and synth["kpis"]
     assert d["ab"]["variants"] and d["ab"]["best"]
-    assert d["sample_transcript"]["redacted"] is True
+    assert synth["sample_transcript"]["redacted"] is True

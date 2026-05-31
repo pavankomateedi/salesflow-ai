@@ -1,10 +1,13 @@
 """Aggregates the observability + experiment data the dashboard renders.
 
-Pure data assembly (no web concern) so it is unit-testable. The synthetic
-baseline (5 adversarial personas) is always included so the dashboard is
-useful from the moment the server starts; if real (live) calls have happened
-on this server, they are summarised alongside as "Your calls" so the dashboard
-reflects what *you* did, not just the eval suite.
+The synthetic baseline (5 adversarial personas + A/B price experiment) is
+deterministic by ``(n_ab, seed)`` and expensive to compute, so the synthetic
+block is built separately and is safe to cache by the caller. The live block
+(real calls captured on the server) must always be request-fresh and is not
+cached.
+
+The web layer calls :func:`synthetic_block` (memoised by ``n_ab``) once per
+``n_ab`` value, then merges with :func:`live_block` on every request.
 """
 
 from __future__ import annotations
@@ -46,23 +49,17 @@ def _block(logs: list[CallLog], *, label: str) -> dict[str, object]:
     }
 
 
-def build_dashboard(
-    n_ab: int = 300,
-    seed: int = 7,
-    live_calls: list[CallLog] | None = None,
-) -> dict[str, object]:
-    synthetic = run_suite()
-    live = list(live_calls or [])
-    judge = GroundingJudge()
-    ab = run_ab(default_price_variants(), n_per_variant=n_ab, seed=seed)
+def synthetic_block(n_ab: int = 300, seed: int = 7) -> dict[str, object]:
+    """The deterministic, cacheable part: self-play KPIs + A/B + grounding judge.
 
+    Safe to memoise by ``(n_ab, seed)``. Does NOT include live calls.
+    """
+    synthetic = run_suite()
+    ab = run_ab(default_price_variants(), n_per_variant=n_ab, seed=seed)
     return {
         "agent_version": AGENT_VERSION,
-        # Headline block — what the user actually wants to see updating: their calls.
-        "live": _block(live, label="Your live calls"),
-        # Always-present baseline so the dashboard is non-empty at startup.
         "synthetic": _block(synthetic, label="Synthetic baseline (5 adversarial personas)"),
-        "hallucination_rate": judge.hallucination_rate(synthetic + live),
+        "synthetic_hallucination_rate": GroundingJudge().hallucination_rate(synthetic),
         "ab": {
             "baseline": ab.baseline,
             "n_per_variant": n_ab,
@@ -78,8 +75,35 @@ def build_dashboard(
                 for r in ab.results
             ],
         },
-        # Back-compat top-level fields so the older Dashboard.jsx still reads ok.
-        "kpis": score_calls(synthetic).as_dict(),
-        "calls": _calls_summary(synthetic),
-        "sample_transcript": to_dict(synthetic[0], redact=True),
+    }
+
+
+def live_block(live_calls: list[CallLog]) -> dict[str, object]:
+    """The request-fresh part: KPIs over the calls captured on this server."""
+    live = list(live_calls or [])
+    return {
+        "live": _block(live, label="Your live calls"),
+        "live_hallucination_rate": GroundingJudge().hallucination_rate(live) if live else 0.0,
+    }
+
+
+def build_dashboard(
+    n_ab: int = 300,
+    seed: int = 7,
+    live_calls: list[CallLog] | None = None,
+) -> dict[str, object]:
+    """Compose synthetic + live blocks. Kept for tests and back-compat callers
+    that don't need caching control. Production uses ``synthetic_block`` directly
+    so the heavy half can be memoised."""
+    synth = synthetic_block(n_ab=n_ab, seed=seed)
+    live = live_block(live_calls or [])
+    return {
+        **synth,
+        **live,
+        # Convenience for the React layer: a combined hallucination_rate
+        # judged over synthetic + live so a misbehaving live call shows up
+        # even when synthetic stays at 0.
+        "hallucination_rate": GroundingJudge().hallucination_rate(
+            run_suite() + (live_calls or [])
+        ),
     }
