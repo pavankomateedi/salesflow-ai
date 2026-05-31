@@ -19,13 +19,15 @@ export default function Voice() {
   const [connected, setConnected] = useState(false);
   const [agentSpeaking, setAgentSpeaking] = useState(false);
   const [listening, setListening] = useState(false);
+  const [callStarted, setCallStarted] = useState(false);
   const [ended, setEnded] = useState(false);
   const [input, setInput] = useState("");
+  const [micLevel, setMicLevel] = useState(0); // 0..1 for the live meter
 
   const wsRef = useRef(null);
   const ctxRef = useRef(null);
   const srcRef = useRef(null); // current playing source (for barge-in)
-  const micRef = useRef(null); // { stream, ctx, processor }
+  const micRef = useRef(null); // { stream, processor }
   const logRef = useRef(null);
 
   function append(role, text, trace) {
@@ -47,11 +49,14 @@ export default function Voice() {
 
   function playPcm(b64, sampleRate) {
     const c = ctx();
+    if (c.state === "suspended") c.resume().catch(() => {});
     const buffer = pcm16ToAudioBuffer(c, b64, sampleRate);
     const source = c.createBufferSource();
     source.buffer = buffer;
     source.connect(c.destination);
-    source.onended = () => { if (srcRef.current === source) { srcRef.current = null; setAgentSpeaking(false); } };
+    source.onended = () => {
+      if (srcRef.current === source) { srcRef.current = null; setAgentSpeaking(false); }
+    };
     srcRef.current = source;
     setAgentSpeaking(true);
     source.start();
@@ -62,7 +67,7 @@ export default function Voice() {
     const ws = new WebSocket(wsUrl("/ws/voice"));
     wsRef.current = ws;
     ws.onopen = () => setConnected(true);
-    ws.onclose = () => setConnected(false);
+    ws.onclose = () => { setConnected(false); setListening(false); };
     ws.onmessage = (ev) => {
       const d = JSON.parse(ev.data);
       if (d.type === "reply") {
@@ -79,9 +84,9 @@ export default function Voice() {
     };
   }
 
+  // Status only fetched on mount; WebSocket + mic start when the user clicks Begin.
   useEffect(() => {
     voiceStatus().then(setStatus);
-    connect();
     return () => {
       wsRef.current?.close();
       stopMic();
@@ -101,10 +106,12 @@ export default function Voice() {
     wsRef.current.send(JSON.stringify({ type: "utterance", text: t }));
   }
 
-  // --- live mic capture (used when Cartesia voice is available) ---
+  // --- live mic capture (always on once the call has started) ---
   async function startMic() {
+    if (micRef.current) return; // already running
     const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
     const c = ctx();
+    if (c.state === "suspended") await c.resume().catch(() => {});
     const sourceNode = c.createMediaStreamSource(stream);
     const processor = c.createScriptProcessor(4096, 1, 1);
     let buffered = [];
@@ -114,9 +121,14 @@ export default function Voice() {
     processor.onaudioprocess = (e) => {
       const frame = e.inputBuffer.getChannelData(0);
       const level = rms(frame);
+      // Smooth the displayed level a bit so the meter doesn't jitter wildly.
+      setMicLevel((prev) => prev * 0.6 + Math.min(1, level * 8) * 0.4);
       const now = performance.now();
       if (level > SPEAK_THRESHOLD) {
-        if (agentSpeaking) { wsRef.current?.send(JSON.stringify({ type: "barge" })); stopPlayback(); }
+        if (agentSpeaking) {
+          wsRef.current?.send(JSON.stringify({ type: "barge" }));
+          stopPlayback();
+        }
         speaking = true;
         lastVoice = now;
         buffered.push(new Float32Array(frame));
@@ -151,6 +163,32 @@ export default function Voice() {
     m.stream.getTracks().forEach((t) => t.stop());
     micRef.current = null;
     setListening(false);
+    setMicLevel(0);
+  }
+
+  async function beginCall() {
+    // One user gesture grants mic permission, unsuspends the AudioContext,
+    // opens the WebSocket, and starts continuous capture. After this, the
+    // mic stays on for the whole call — no further Start/Stop required.
+    setCallStarted(true);
+    try { await startMic(); } catch (e) { append("sys", `mic blocked: ${e.message}`); return; }
+    connect();
+  }
+
+  function endCall() {
+    stopMic();
+    wsRef.current?.close();
+    setCallStarted(false);
+    setEnded(false);
+    setMessages([]);
+  }
+
+  function restartCall() {
+    stopMic();
+    wsRef.current?.close();
+    setMessages([]); setEnded(false);
+    // Reuse the existing user gesture (this is fired from a button click).
+    startMic().then(connect).catch((e) => append("sys", `mic blocked: ${e.message}`));
   }
 
   const available = status?.available;
@@ -159,21 +197,47 @@ export default function Voice() {
     <div>
       <h1>Live voice</h1>
       <p className="sub">
-        Real-time voice loop over WebSocket: prospect speech → STT → the deterministic agent → TTS,
-        with barge-in. Cartesia powers STT+TTS when a key is set.
+        One click to begin — then Vani listens continuously, detects each utterance
+        by silence, and replies in real time. Cartesia powers STT+TTS; OpenAI rephrases.
       </p>
+
       <div className="statusbar">
-        <span className={`pill ${connected ? "good" : "bad"}`}>{connected ? "connected" : "disconnected"}</span>
+        <span className={`pill ${connected ? "good" : "warn"}`}>
+          {connected ? "connected" : (callStarted ? "connecting…" : "ready")}
+        </span>
         <span className={`pill ${available ? "good" : "warn"}`}>
           {available ? "Cartesia voice live" : "no voice key — text fallback"}
         </span>
         {agentSpeaking && <span className="pill">Vani speaking…</span>}
-        {listening && <span className="pill good">listening…</span>}
+        {listening && !agentSpeaking && <span className="pill good">listening…</span>}
         {status && <span className="muted">{status.note}</span>}
       </div>
 
+      {/* live mic-level meter (only visible while the call is active) */}
+      {callStarted && available && (
+        <div style={{
+          height: 4, background: "rgba(148,163,184,.18)",
+          borderRadius: 999, overflow: "hidden", margin: "0 0 14px",
+        }}>
+          <div style={{
+            height: "100%",
+            width: `${Math.min(100, micLevel * 100)}%`,
+            background: agentSpeaking
+              ? "linear-gradient(90deg, var(--purple), var(--pink))"
+              : "linear-gradient(90deg, var(--teal), var(--purple))",
+            transition: "width 80ms ease-out",
+          }} />
+        </div>
+      )}
+
       <div className="log" ref={logRef}>
-        {messages.length === 0 && <div className="center">Connecting… Vani will greet you.</div>}
+        {messages.length === 0 && (
+          <div className="center">
+            {available
+              ? (callStarted ? "Connecting… Vani will greet you." : "Click Begin call — Vani will greet you and start listening.")
+              : "Type the prospect's line below to drive the loop."}
+          </div>
+        )}
         {messages.map((m, i) => (
           <div key={i} className={`msg ${m.role}`}>
             {m.text}
@@ -184,19 +248,34 @@ export default function Voice() {
 
       {available ? (
         <div className="composer">
-          {!listening ? (
-            <button className="btn primary" onClick={startMic} disabled={ended}>🎙 Start talking</button>
+          {!callStarted ? (
+            <button className="btn primary" onClick={beginCall} disabled={ended}>
+              🎙 Begin call
+            </button>
           ) : (
-            <button className="btn danger" onClick={stopMic}>■ Stop mic</button>
+            <>
+              <button className="btn danger" onClick={endCall}>■ End call</button>
+              <button type="button" className="btn" onClick={restartCall}>↻ New call</button>
+            </>
           )}
-          <button type="button" className="btn" onClick={() => { stopMic(); connect(); }}>New call</button>
         </div>
       ) : (
-        <form className="composer" onSubmit={(e) => { e.preventDefault(); sendText(input); setInput(""); }}>
-          <input value={input} onChange={(e) => setInput(e.target.value)}
-                 placeholder="No voice key — type the prospect's line to drive the loop…" disabled={ended} />
+        <form className="composer" onSubmit={(e) => {
+          e.preventDefault();
+          if (!connected) connect();
+          sendText(input);
+          setInput("");
+        }}>
+          <input
+            value={input}
+            onChange={(e) => setInput(e.target.value)}
+            placeholder="No voice key — type the prospect's line to drive the loop…"
+            disabled={ended}
+          />
           <button className="btn primary" disabled={ended}>Send</button>
-          <button type="button" className="btn" onClick={connect}>New call</button>
+          <button type="button" className="btn" onClick={() => { setMessages([]); setEnded(false); connect(); }}>
+            New call
+          </button>
         </form>
       )}
     </div>
