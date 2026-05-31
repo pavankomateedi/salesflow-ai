@@ -109,6 +109,39 @@ def test_qualification_probe_does_not_loop_on_positive_reply() -> None:
     assert "So to recap" in second.utterance
 
 
+def test_close_fires_on_bare_yes_after_recap() -> None:
+    """User report: after the pivot recap, saying "Yes." kept asking the close
+    question again instead of closing. A bare "Yes." doesn't match the
+    positive-intent phrase list, so close detection must accept POSITIVE
+    sentiment too."""
+    agent = SalesAgent()
+    lead = Lead(
+        phone="+15550005555",
+        known={
+            "student_name": "Mia",
+            "grade_level": "8th",
+            "subjects": "math",
+            "performance_level": "C",
+            "parent_contact": "mia@example.com",
+            "urgency": "soon",
+            "prior_tutoring": "no",
+            "test_deadline": "May",
+            "schedule_windows": "evenings",
+            "decision_maker": "me",
+            "budget_signal": "200",
+        },
+    )
+    state = ConversationState(lead=lead)
+    agent.open(state)
+    # First positive reply fires the pivot recap.
+    first = agent.respond(state, "Yes, sounds good.")
+    assert first.phase == Phase.PIVOT_TO_CLOSE
+    # Bare "Yes." now must CLOSE (not loop the close question).
+    second = agent.respond(state, "Yes.")
+    assert second.phase == Phase.CLOSE
+    assert second.decision.get("step") == "close"
+
+
 def test_qualification_probes_vary_on_repeat() -> None:
     """Even when forced to probe twice (e.g., neutral replies), the second
     probe must differ from the first so it doesn't read as a broken record."""

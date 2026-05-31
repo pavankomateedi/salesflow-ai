@@ -17,11 +17,14 @@ from typing import Any
 from salesflow.voice.interfaces import AudioChunk
 
 DEFAULT_MODEL = "sonic-2"
-# Default voice: "Sophie" — Cartesia's warm female American English voice, so
-# Vani (a female persona) sounds female by default. Override per-deployment with
-# the ``CARTESIA_VOICE_ID`` env var; browse alternatives at
-# https://play.cartesia.ai/voices (copy the voice id from any voice card).
-DEFAULT_VOICE_ID = "f9836c6e-a0bd-460e-9d3c-f7299fa60f94"
+# Default voice: an energetic female American English voice ("Brooke" / similar)
+# so Vani (a female persona) sounds engaged and upbeat rather than flat. Override
+# per-deployment with the ``CARTESIA_VOICE_ID`` env var; browse alternatives at
+# https://play.cartesia.ai/voices and copy the voice id from any voice card.
+DEFAULT_VOICE_ID = "6f84f4b8-58a2-430c-8c79-688dad597532"
+# Speech speed: Cartesia's ModelSpeed is "slow" | "normal" | "fast". "fast"
+# reads as more energetic; override with ``CARTESIA_VOICE_SPEED``.
+DEFAULT_SPEED = "fast"
 DEFAULT_SAMPLE_RATE = 16000
 
 
@@ -45,6 +48,7 @@ class CartesiaTTS:
         self.voice_id = voice_id or os.environ.get("CARTESIA_VOICE_ID", DEFAULT_VOICE_ID)
         self.model = model
         self.sample_rate = sample_rate
+        self.speed: Any = os.environ.get("CARTESIA_VOICE_SPEED", DEFAULT_SPEED)
 
     def synthesize(self, text: str) -> AudioChunk:  # pragma: no cover - live only
         # The SDK's output_format is a strict TypedDict union; the raw dict shape
@@ -61,6 +65,7 @@ class CartesiaTTS:
             voice=voice,
             language="en",
             output_format=output_format,
+            speed=self.speed,
         )
         pcm = b"".join(chunks)
         # ~150 wpm => ~400ms/word is too slow; estimate ~60ms/word for metrics.

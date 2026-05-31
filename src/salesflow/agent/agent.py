@@ -323,8 +323,16 @@ class SalesAgent:
         last_prospect = state.prospect_turns[-1].text if state.prospect_turns else ""
         already_pivoted = state.phase == Phase.PIVOT_TO_CLOSE
 
-        # If we already pivoted and the prospect just gave positive intent, close.
-        if already_pivoted and analysis.is_positive_intent(last_prospect):
+        # If we already pivoted and the prospect agreed, close. Accept BOTH the
+        # specific positive-intent phrases (e.g., "sign me up", "let's do it")
+        # AND tight close-affirmations ("Yes.", "Sure.", "Okay yeah") — but NOT
+        # generic positive sentiment, because polite rejections like "I'll think
+        # about it, thanks." would otherwise close the call.
+        positive_reply = (
+            analysis.is_positive_intent(last_prospect)
+            or analysis.is_close_affirmation(last_prospect)
+        )
+        if already_pivoted and positive_reply:
             state.phase = Phase.CLOSE
             state.outcome = Outcome.CLOSED_WON
             action = AgentAction(

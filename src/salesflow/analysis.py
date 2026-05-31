@@ -93,6 +93,31 @@ def is_positive_intent(text: str) -> bool:
     return _contains_any(text, _POSITIVE_INTENT)
 
 
+_AFFIRM_STARTS: tuple[str, ...] = (
+    "yes", "yeah", "yep", "yup", "sure", "ok", "okay",
+    "absolutely", "definitely", "of course",
+)
+_REJECTION_TOKENS: frozenset[str] = frozenset(
+    "think later maybe not won't wouldn't can't couldn't no nah pass".split()
+)
+
+
+def is_close_affirmation(text: str) -> bool:
+    """Tight check: a real close affirmation, not just any positive word.
+
+    Returns True for bare/soft yes replies to the close question ("Yes.",
+    "Sure.", "Okay yes"); False for polite rejections that happen to contain
+    positive words ("I'll think about it, thanks.", "Yeah, no thanks."). The
+    broad positive-sentiment check was misclassifying the rejection case as
+    close intent and prematurely closing the A/B simulated calls.
+    """
+    cleaned = text.strip().lower()
+    if not any(cleaned.startswith(a) for a in _AFFIRM_STARTS):
+        return False
+    tokens = set(_tokens(cleaned))
+    return not (tokens & _REJECTION_TOKENS)
+
+
 def extracts_field(field_name: str, text: str) -> str | None:
     """Very small deterministic field extractor for self-play / golden tests.
 
