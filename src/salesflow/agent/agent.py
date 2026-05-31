@@ -48,6 +48,10 @@ _COMPETITIVE_INTENT = (
     "why nerdy", "stand out", "other services", "other tutoring", "self-service",
     "in-person", "in person", "local tutor", "local tutoring", "another service",
 )
+# Warm sign-off appended to every terminal utterance (close / escalation /
+# graceful exit) so every call ends with the same closer regardless of outcome.
+CLOSING_THANKS = "Many thanks for your time today and speak to you soon!"
+
 # Specific facts we deliberately do not hold; a question hitting these escalates
 # as low-confidence rather than being answered from a loosely-matching chunk.
 _OUT_OF_SCOPE = (
@@ -352,7 +356,8 @@ class SalesAgent:
             action = AgentAction(
                 utterance=(
                     "Wonderful — I'll get your tutor match started and send a confirmation "
-                    "to your contact on file. You'll hear from us within 48 hours."
+                    "to your contact on file. You'll hear from us within 48 hours. "
+                    + CLOSING_THANKS
                 ),
                 phase=Phase.CLOSE,
                 decision={"step": "close", "pivot": pivot_signals},
@@ -440,7 +445,8 @@ class SalesAgent:
         action = AgentAction(
             utterance=(
                 "Let me get you to a specialist who can give you the most accurate help — "
-                "I'm connecting you now and passing along everything we've discussed."
+                "I'm connecting you now and passing along everything we've discussed. "
+                + CLOSING_THANKS
             ),
             phase=Phase.ESCALATION,
             escalation=trigger,
@@ -454,8 +460,8 @@ class SalesAgent:
         state.outcome = Outcome.GRACEFUL_EXIT
         action = AgentAction(
             utterance=(
-                "Totally understand — thanks for your time. May we reach out in the future "
-                "if things change? Have a great day either way."
+                "Totally understand. May we reach out in the future if things change? "
+                + CLOSING_THANKS
             ),
             phase=Phase.GRACEFUL_EXIT,
             decision={"step": "graceful_exit"},
