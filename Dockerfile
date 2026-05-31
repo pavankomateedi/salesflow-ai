@@ -22,9 +22,15 @@ ENV PYTHONUNBUFFERED=1 \
 WORKDIR /app
 
 # Install the package + web extra first (better layer caching).
+# Production needs ALL three optional extras:
+#   web   -> FastAPI + uvicorn (serves the SPA + APIs)
+#   voice -> cartesia + groq (live STT/TTS on /voice)
+#   llm   -> openai (natural phrasing, smart extraction, recap review)
+# Without these, voice_available() returns True (env var set) but the SDK
+# import fails at runtime and the websocket surfaces "SDK not installed".
 COPY pyproject.toml README.md ./
 COPY src ./src
-RUN pip install --upgrade pip && pip install ".[web]"
+RUN pip install --upgrade pip && pip install ".[web,voice,llm]"
 
 # Built SPA, served by FastAPI as static files.
 COPY --from=frontend /ui/dist ./frontend/dist
